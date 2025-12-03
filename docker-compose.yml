@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  anilibria-torznab:
+    build: .
+    container_name: anilibria-torznab
+    restart: unless-stopped
+    environment:
+      - ANILIBRIA_BASE=https://anilibria.top/api
+      - ANILIBRIA_SEARCH_PATH=/v1/titles
+      - ANILIBRIA_TORRENT_FIELD=torrents
+      - USER_AGENT=anilibria-torznab-bridge/1.0
+    ports:
+      - "8080:8080"
