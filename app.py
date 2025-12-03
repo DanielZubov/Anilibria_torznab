@@ -1,6 +1,6 @@
 # app.py
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import Response, PlainTextResponse
+from fastapi import FastAPI, Query
+from fastapi.responses import Response
 import requests
 import os
 import xml.etree.ElementTree as ET
@@ -12,13 +12,9 @@ app = FastAPI()
 
 # Configuration via env
 ANILIBRIA_BASE = os.getenv("ANILIBRIA_BASE", "https://anilibria.top/api")
-# Default search path patterns (you can override to match real API)
-# Try a few common possibilities; change via ANILIBRIA_SEARCH_PATH
-ANILIBRIA_SEARCH_PATH = os.getenv("ANILIBRIA_SEARCH_PATH", "/v1/titles")  # default guess
-ANILIBRIA_TORRENT_FIELD = os.getenv("ANILIBRIA_TORRENT_FIELD", "torrents")  # field containing torrent entries
+ANILIBRIA_SEARCH_PATH = os.getenv("ANILIBRIA_SEARCH_PATH", "/v1/titles")
+ANILIBRIA_TORRENT_FIELD = os.getenv("ANILIBRIA_TORRENT_FIELD", "torrents")
 
-# Categories mapping (Torznab numeric -> human)
-# Prowlarr commonly uses 5070 for anime; you can extend this mapping
 CATEGORIES = {
     "5070": {"name": "Anime", "query_cat": "anime"},
     "5000": {"name": "TV", "query_cat": "tv"},
@@ -26,33 +22,20 @@ CATEGORIES = {
 }
 
 USER_AGENT = os.getenv("USER_AGENT", "anilibria-torznab-bridge/1.0")
-
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT})
 
-def prettify_xml(elem: ET.Element) -> str:
-    raw = ET.tostring(elem, encoding="utf-8")
-    parsed = minidom.parseString(raw)
-    return parsed.toprettyxml(indent="  ", encoding="utf-8")
 
-def build_caps_xml() -> bytes:
-    rss = ET.Element("caps")
-    server = ET.SubElement(rss, "server")
-    ET.SubElement(server, "title").text = "AniLibria Torznab Bridge"
-    ET.SubElement(server, "version").text = "1.0"
-    ET.SubElement(server, "email").text = ""
-    ET.SubElement(server, "location").text = ANILIBRIA_BASE
+def safe_text(value) -> str:
+    """Преобразует любое значение в строку, безопасную для XML"""
+    if isinstance(value, str):
+        return value
+    elif isinstance(value, (int, float)):
+        return str(value)
+    return str(value)
 
-    catmap = ET.SubElement(rss, "categories")
-    for catid, info in CATEGORIES.items():
-        c = ET.SubElement(catmap, "category", {"id": catid})
-        c.text = info["name"]
-
-    caps = ET.Element("caps")
-    return ET.tostring(rss, encoding="utf-8")
 
 def iso_to_rfc2822(dt_str: str) -> str:
-    # try parse common ISO formats, fallback to now
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
     except Exception:
@@ -62,92 +45,57 @@ def iso_to_rfc2822(dt_str: str) -> str:
             dt = datetime.utcnow()
     return dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
 
-def fetch_anilibria(query: str, limit: int = 50, category: Optional[str] = None, season: Optional[str] = None, ep: Optional[str] = None) -> List[dict]:
-    """
-    Fetch results from AniLibria REST API.
-    This function is intentionally permissive: many API shapes exist, so the URL & query params are configurable.
-    If your endpoint differs, change ANILIBRIA_SEARCH_PATH to the correct path (for example: /v1/search or /v1/titles).
-    """
+
+def fetch_anilibria(query: str, limit: int = 50, category: Optional[str] = None,
+                    season: Optional[str] = None, ep: Optional[str] = None) -> List[dict]:
     base = ANILIBRIA_BASE.rstrip("/")
     path = ANILIBRIA_SEARCH_PATH.lstrip("/")
     url = f"{base}/{path}"
 
-    params = {}
-    # Common query parameter names tried; override by setting ANILIBRIA_*
-    # Many APIs use 'query' or 'q'
-    params_name = os.getenv("ANILIBRIA_QUERY_PARAM", os.getenv("QUERY_PARAM", "query"))
-    params[params_name] = query
-    params["limit"] = limit
-
-    # If category mapping provided, map to API category param name
+    params_name = os.getenv("ANILIBRIA_QUERY_PARAM", "query")
+    params = {params_name: query, "limit": limit}
     if category:
-        # try typical API param names in order
-        for pname in ("category", "cat", "genre", "type"):
-            # only set if not already present
-            if pname not in params:
-                params[pname] = category
-                break
-
-    # season/ep if passed
+        params["category"] = category
     if season:
         params["season"] = season
     if ep:
         params["episode"] = ep
-        # some APIs use 'ep' or 'ep_num' etc.
 
     try:
         resp = SESSION.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-    except Exception as e:
-        # Try fallback: maybe v3 torznab exists
-        # Note: this fallback will NOT parse JSON but attempt to use a Torznab endpoint if available.
+    except Exception:
         fallback = os.getenv("ANILIBRIA_FALLBACK_V3", "https://api.anilibria.tv/v3/search/torznab")
         try:
             r = SESSION.get(fallback, params={"q": query, "limit": limit}, timeout=10)
             r.raise_for_status()
-            # return a wrapper that indicates this is already torznab xml (we won't parse JSON in this flow)
             return {"__torznab_xml__": r.text}
         except Exception:
             return []
 
-    # Heuristic: if API returns dict with 'data' or 'results' list
     if isinstance(data, dict):
-        for key in ("data", "results", "items"):
+        for key in ("data", "results", "items", "titles"):
             if key in data and isinstance(data[key], list):
                 return data[key]
-        # If dict is already a list-like mapping of titles
-        # fallback: if top-level looks like list via some wrapper
-        # try to find list by scanning values
         for v in data.values():
             if isinstance(v, list):
                 return v
-        # otherwise maybe it's already a list-like structure in 'titles'
-        if "titles" in data and isinstance(data["titles"], list):
-            return data["titles"]
-        # if API returns single object for the query — wrap in list
         return [data]
     elif isinstance(data, list):
         return data
-    else:
-        return []
+    return []
 
-def safe_text(val):
-    """Convert any value to string, fallback to empty string if None."""
-    if val is None:
-        return ""
-    if not isinstance(val, str):
-        return str(val)
-    return val
 
 def map_result_to_item(res: dict) -> ET.Element:
-    """
-    Map one AniLibria JSON result to an RSS <item>.
-    """
     item = ET.Element("item")
-    
+
     # title
-    title = res.get("name") or res.get("title") or res.get("rus") or res.get("eng") or res.get("full_title") or res.get("title_native")
+    title_field = res.get("title") or res.get("name") or res.get("rus") or res.get("eng") or res.get("full_title")
+    if isinstance(title_field, dict):
+        title = title_field.get("english") or title_field.get("main") or next(iter(title_field.values()))
+    else:
+        title = title_field
     ET.SubElement(item, "title").text = safe_text(title) or "Unknown title"
 
     # link
@@ -165,7 +113,28 @@ def map_result_to_item(res: dict) -> ET.Element:
     pub = res.get("published") or res.get("created_at") or res.get("date") or res.get("pubDate")
     ET.SubElement(item, "pubDate").text = iso_to_rfc2822(pub) if pub else datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
-    # enclosure — pick first torrent/magnet
+    # category
+    cat_field = res.get("genre") or res.get("type") or "Anime"
+    if isinstance(cat_field, dict):
+        cat_text = cat_field.get("value") or cat_field.get("name") or next(iter(cat_field.values()))
+    else:
+        cat_text = cat_field
+    ET.SubElement(item, "category").text = safe_text(cat_text)
+
+    # description
+    desc = res.get("description") or res.get("short_description") or res.get("announce") or ""
+    ET.SubElement(item, "description").text = safe_text(desc)
+
+    # thumb / poster
+    poster_field = res.get("poster") or res.get("image") or res.get("cover")
+    if isinstance(poster_field, dict):
+        poster_url = poster_field.get("src") or poster_field.get("preview") or poster_field.get("thumbnail")
+    else:
+        poster_url = poster_field
+    if poster_url:
+        ET.SubElement(item, "thumb").text = safe_text(poster_url)
+
+    # enclosure (torrent)
     torrents = res.get(ANILIBRIA_TORRENT_FIELD) or res.get("torrents") or res.get("files") or []
     if isinstance(torrents, dict):
         torrents = list(torrents.values())
@@ -188,38 +157,19 @@ def map_result_to_item(res: dict) -> ET.Element:
             e.set("length", str(chosen.get("size", 0)))
             e.set("type", chosen.get("mime_type", "application/x-bittorrent") if isinstance(chosen, dict) else "application/x-bittorrent")
 
-    # category
-    cat_text = res.get("genre") or res.get("type") or "Anime"
-    ET.SubElement(item, "category").text = safe_text(cat_text)
-
-    # description
-    desc = res.get("description") or res.get("short_description") or res.get("announce") or ""
-    if desc:
-        d = ET.SubElement(item, "description")
-        d.text = safe_text(desc)
-
-    # torznab attrs: size, seeders, leechers, infohash
+    # seeders, leechers, infohash
     size = chosen.get("size") if chosen else None
     seeders = chosen.get("seeders") if chosen else None
     leechers = chosen.get("leechers") if chosen else None
     infohash = chosen.get("infoHash") if chosen else None
-    size = size or res.get("size")
-    seeders = seeders or res.get("seeders")
-    leechers = leechers or res.get("leechers")
-    infohash = infohash or res.get("info_hash") or res.get("infohash")
-    if size is not None:
-        ET.SubElement(item, "size").text = str(size)
+    if infohash:
+        ET.SubElement(item, "torznab:attr", {"name": "infohash", "value": safe_text(infohash)})
     if seeders is not None:
         ET.SubElement(item, "seeders").text = str(seeders)
     if leechers is not None:
         ET.SubElement(item, "leechers").text = str(leechers)
-    if infohash:
-        ET.SubElement(item, "torznab:attr", {"name": "infohash", "value": safe_text(infohash)})
-
-    # poster / thumb
-    poster = res.get("poster") or res.get("image") or res.get("cover")
-    if poster:
-        ET.SubElement(item, "thumb").text = safe_text(poster)
+    if size:
+        ET.SubElement(item, "size").text = str(size)
 
     return item
 
@@ -228,9 +178,9 @@ def map_result_to_item(res: dict) -> ET.Element:
 def health():
     return {"status": "ok"}
 
+
 @app.get("/capabilities")
 def capabilities():
-    # Return a simple Torznab caps XML
     root = ET.Element("caps")
     server = ET.SubElement(root, "server")
     ET.SubElement(server, "name").text = "AniLibria Torznab Bridge"
@@ -246,15 +196,13 @@ def capabilities():
     xml = ET.tostring(root, encoding="utf-8")
     return Response(content=xml, media_type="application/xml")
 
+
 @app.get("/torznab")
-def torznab(q: Optional[str] = Query(None), t: Optional[str] = Query(None), limit: Optional[int] = Query(50), cat: Optional[str] = Query(None),
-            season: Optional[str] = Query(None), ep: Optional[str] = Query(None), offset: Optional[int] = Query(0)):
-    """
-    Main Torznab endpoint. Accepts typical torznab params:
-      q (or 't'), cat, limit, season, ep, offset
-    """
+def torznab(q: Optional[str] = Query(None), t: Optional[str] = Query(None), limit: Optional[int] = Query(50),
+            cat: Optional[str] = Query(None), season: Optional[str] = Query(None),
+            ep: Optional[str] = Query(None), offset: Optional[int] = Query(0)):
+
     query = q or t or ""
-    # If no query, return empty feed
     channel = ET.Element("rss", {"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"})
     ch = ET.SubElement(channel, "channel")
     ET.SubElement(ch, "title").text = "AniLibria Bridge"
@@ -262,25 +210,14 @@ def torznab(q: Optional[str] = Query(None), t: Optional[str] = Query(None), limi
     ET.SubElement(ch, "description").text = f"Results for {query}"
     ET.SubElement(ch, "lastBuildDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
-    # Try fetch
     fetched = fetch_anilibria(query=query, limit=limit, category=cat, season=season, ep=ep)
-    # If fallback returned xml already, pass it directly
     if isinstance(fetched, dict) and "__torznab_xml__" in fetched:
         return Response(content=fetched["__torznab_xml__"], media_type="application/xml")
 
-    if not fetched:
-        # empty feed
-        return Response(content=ET.tostring(channel, encoding="utf-8"), media_type="application/rss+xml")
-
-    # fetched is a list of results (dicts)
-    added = 0
-    for res in fetched:
+    for res in fetched[:limit]:
         try:
             item = map_result_to_item(res)
             ch.append(item)
-            added += 1
-            if added >= limit:
-                break
         except Exception:
             continue
 
