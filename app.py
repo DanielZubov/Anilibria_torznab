@@ -213,6 +213,7 @@ def torznab(q: Optional[str] = Query(None),
 
         item = ET.SubElement(ch, "item")
         ET.SubElement(item, "title").text = "Prowlarr Test Entry"
+
         guid = ET.SubElement(item, "guid", {"isPermaLink": "false"})
         guid.text = "test-12345"
 
@@ -220,6 +221,9 @@ def torznab(q: Optional[str] = Query(None),
         enclosure.set("url", "https://example.com/test.torrent")
         enclosure.set("length", "123456")
         enclosure.set("type", "application/x-bittorrent")
+
+        # 🔥 ВАЖНО: ЭТО НУЖНО PROWLARR
+        ET.SubElement(item, "pubDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
         return Response(
             content=ET.tostring(test_rss, encoding="utf-8"),
