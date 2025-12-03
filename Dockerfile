@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 
 ENV ANILIBRIA_BASE="https://anilibria.top/api"
-ENV ANILIBRIA_SEARCH_PATH="/v1/titles"
+ENV ANILIBRIA_SEARCH_PATH="/v1/search/releases"
 ENV ANILIBRIA_TORRENT_FIELD="torrents"
 ENV USER_AGENT="anilibria-torznab-bridge/1.0"
 
