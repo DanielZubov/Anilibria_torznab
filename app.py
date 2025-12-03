@@ -132,50 +132,46 @@ def fetch_anilibria(query: str, limit: int = 50, category: Optional[str] = None,
     else:
         return []
 
+def safe_text(val):
+    """Convert any value to string, fallback to empty string if None."""
+    if val is None:
+        return ""
+    if not isinstance(val, str):
+        return str(val)
+    return val
+
 def map_result_to_item(res: dict) -> ET.Element:
     """
     Map one AniLibria JSON result to an RSS <item>.
-    This mapping is best-effort; adjust fields according to actual API response.
     """
     item = ET.Element("item")
+    
+    # title
     title = res.get("name") or res.get("title") or res.get("rus") or res.get("eng") or res.get("full_title") or res.get("title_native")
-    ET.SubElement(item, "title").text = title or "Unknown title"
+    ET.SubElement(item, "title").text = safe_text(title) or "Unknown title"
 
-    # link / details
-    link = None
-    if res.get("site_url"):
-        link = res.get("site_url")
-    elif res.get("url"):
-        link = res.get("url")
-    elif res.get("id"):
-        link = f"https://www.anilibria.top/releases/{res.get('id')}"
+    # link
+    link = res.get("site_url") or res.get("url") or (f"https://www.anilibria.top/releases/{res.get('id')}" if res.get("id") else None)
     if link:
-        ET.SubElement(item, "link").text = link
+        ET.SubElement(item, "link").text = safe_text(link)
 
     # guid
     guid = res.get("id") or res.get("guid") or res.get("hash") or link or title
     g = ET.SubElement(item, "guid")
-    g.text = str(guid)
+    g.text = safe_text(guid)
     g.set("isPermaLink", "false")
 
     # pubDate
     pub = res.get("published") or res.get("created_at") or res.get("date") or res.get("pubDate")
-    if pub:
-        ET.SubElement(item, "pubDate").text = iso_to_rfc2822(pub)
-    else:
-        ET.SubElement(item, "pubDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+    ET.SubElement(item, "pubDate").text = iso_to_rfc2822(pub) if pub else datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
-    # enclosure — find torrent/magnet
-    # many APIs store a 'torrents' array or 'files'
+    # enclosure — pick first torrent/magnet
     torrents = res.get(ANILIBRIA_TORRENT_FIELD) or res.get("torrents") or res.get("files") or []
     if isinstance(torrents, dict):
-        # sometimes dict keyed by quality
         torrents = list(torrents.values())
-    # pick first torrent-like item
     chosen = None
     for t in torrents:
         if isinstance(t, dict):
-            # common fields: "url", "magnet", "link", "download"
             for k in ("url", "magnet", "link", "download"):
                 if k in t and t[k]:
                     chosen = t
@@ -184,65 +180,49 @@ def map_result_to_item(res: dict) -> ET.Element:
             chosen = {"url": t}
         if chosen:
             break
-
     if chosen:
         enclosure_url = chosen.get("url") or chosen.get("magnet") or chosen.get("link") or chosen.get("download")
         if enclosure_url:
             e = ET.SubElement(item, "enclosure")
-            e.set("url", enclosure_url)
-            # size/type may be unknown; set length=0 and type
+            e.set("url", safe_text(enclosure_url))
             e.set("length", str(chosen.get("size", 0)))
             e.set("type", chosen.get("mime_type", "application/x-bittorrent") if isinstance(chosen, dict) else "application/x-bittorrent")
 
     # category
     cat_text = res.get("genre") or res.get("type") or "Anime"
-    ET.SubElement(item, "category").text = cat_text
+    ET.SubElement(item, "category").text = safe_text(cat_text)
 
     # description
     desc = res.get("description") or res.get("short_description") or res.get("announce") or ""
     if desc:
         d = ET.SubElement(item, "description")
-        d.text = desc
+        d.text = safe_text(desc)
 
-    # torznab:attr elements
-    # size, seeders, leechers, infoHash (if present)
-    size = None
-    seeders = None
-    leechers = None
-    infohash = None
-    # try to extract from chosen torrent
-    if chosen and isinstance(chosen, dict):
-        size = chosen.get("size") or chosen.get("filesize") or chosen.get("length")
-        seeders = chosen.get("seeders") or chosen.get("seeds")
-        leechers = chosen.get("leechers") or chosen.get("peers")
-        infohash = chosen.get("infoHash") or chosen.get("hash")
-    # sometimes top-level fields
+    # torznab attrs: size, seeders, leechers, infohash
+    size = chosen.get("size") if chosen else None
+    seeders = chosen.get("seeders") if chosen else None
+    leechers = chosen.get("leechers") if chosen else None
+    infohash = chosen.get("infoHash") if chosen else None
     size = size or res.get("size")
     seeders = seeders or res.get("seeders")
     leechers = leechers or res.get("leechers")
     infohash = infohash or res.get("info_hash") or res.get("infohash")
-
-    if size:
-        s = ET.SubElement(item, "size")
-        s.text = str(size)
+    if size is not None:
+        ET.SubElement(item, "size").text = str(size)
     if seeders is not None:
-        sd = ET.SubElement(item, "seeders")
-        sd.text = str(seeders)
+        ET.SubElement(item, "seeders").text = str(seeders)
     if leechers is not None:
-        ld = ET.SubElement(item, "leechers")
-        ld.text = str(leechers)
-
-    # torznab attr (info hash)
+        ET.SubElement(item, "leechers").text = str(leechers)
     if infohash:
-        attr = ET.SubElement(item, "torznab:attr", {"name": "infohash", "value": str(infohash)})
+        ET.SubElement(item, "torznab:attr", {"name": "infohash", "value": safe_text(infohash)})
 
-    # poster if present
+    # poster / thumb
     poster = res.get("poster") or res.get("image") or res.get("cover")
     if poster:
-        thumb = ET.SubElement(item, "thumb")
-        thumb.text = poster
+        ET.SubElement(item, "thumb").text = safe_text(poster)
 
     return item
+
 
 @app.get("/health")
 def health():
