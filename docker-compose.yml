@@ -1,6 +1,6 @@
 services:
   anilibria-torznab:
-    image: ststoxxl/anilibria-torznab:latest
+    image: statoxxl/anilibria-torznab:latest
     container_name: anilibria-torznab
     restart: unless-stopped
     environment:
