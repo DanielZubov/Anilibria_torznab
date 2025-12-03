@@ -1,4 +1,3 @@
-# app.py
 from fastapi import FastAPI, Query
 from fastapi.responses import Response
 import requests
@@ -85,7 +84,6 @@ def fetch_anilibria(query: str, limit: int = 50, category: Optional[str] = None,
 def map_result_to_item(res: dict) -> Optional[ET.Element]:
     item = ET.Element("item")
 
-    # title
     title_field = res.get("title") or res.get("name") or "Unknown title"
     if isinstance(title_field, dict):
         title = title_field.get("english") or title_field.get("main") or next(iter(title_field.values()))
@@ -93,29 +91,23 @@ def map_result_to_item(res: dict) -> Optional[ET.Element]:
         title = title_field
     ET.SubElement(item, "title").text = safe_text(title)
 
-    # link
     link = res.get("site_url") or f"https://www.anilibria.top/releases/{res.get('id')}"
     ET.SubElement(item, "link").text = safe_text(link)
 
-    # guid
     guid = ET.SubElement(item, "guid")
     guid.text = safe_text(res.get("id") or link)
     guid.set("isPermaLink", "false")
 
-    # pub date
     pub = res.get("published") or datetime.utcnow().isoformat()
     ET.SubElement(item, "pubDate").text = iso_to_rfc2822(pub)
 
-    # description
     desc = res.get("description") or ""
     ET.SubElement(item, "description").text = safe_text(desc)
 
-    # category
     cat_field = res.get("genre") or "Anime"
     cat_text = cat_field.get("name") if isinstance(cat_field, dict) else cat_field
     ET.SubElement(item, "category").text = safe_text(cat_text)
 
-    # poster
     poster_field = res.get("poster")
     poster_url = None
     if isinstance(poster_field, dict):
@@ -126,8 +118,8 @@ def map_result_to_item(res: dict) -> Optional[ET.Element]:
     if poster_url:
         ET.SubElement(item, "thumb").text = safe_text(poster_url)
 
-    # torrents
     torrents = res.get(ANILIBRIA_TORRENT_FIELD) or []
+
     if isinstance(torrents, dict):
         torrents = list(torrents.values())
 
@@ -147,7 +139,6 @@ def map_result_to_item(res: dict) -> Optional[ET.Element]:
         if enclosure_url:
             break
 
-    # ❗ Если enclosure отсутствует — пропускаем item
     if not enclosure_url:
         return None
 
@@ -172,8 +163,10 @@ def torznab(q: Optional[str] = Query(None),
             season: Optional[str] = Query(None),
             ep: Optional[str] = Query(None)):
 
+    # ===== CAPS =====
     if t == "caps":
         root = ET.Element("caps")
+
         server = ET.SubElement(root, "server")
         ET.SubElement(server, "title").text = "AniLibria Bridge"
         ET.SubElement(server, "version").text = "1.0"
@@ -188,10 +181,33 @@ def torznab(q: Optional[str] = Query(None),
         for cid, info in CATEGORIES.items():
             ET.SubElement(cats, "category", {"id": cid, "name": info["name"]})
 
-        return Response(content=ET.tostring(root, encoding="utf-8"), media_type="application/xml")
+        return Response(content=ET.tostring(root, encoding="utf-8"),
+                        media_type="application/xml")
 
-    # main search
+    # ===== TEST REQUEST FROM PROWLARR =====
+    if t == "search" and not q:
+        root = ET.Element("rss", {"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"})
+        ch = ET.SubElement(root, "channel")
+        ET.SubElement(ch, "title").text = "AniLibria Bridge"
+        ET.SubElement(ch, "description").text = "Test search OK"
 
+        item = ET.SubElement(ch, "item")
+        ET.SubElement(item, "title").text = "Test Item (Prowlarr Validation)"
+        guid = ET.SubElement(item, "guid", {"isPermaLink": "false"})
+        guid.text = "test-12345"
+
+        ET.SubElement(item, "link").text = "https://example.com/test"
+        ET.SubElement(item, "size").text = "123456789"
+        ET.SubElement(item, "pubDate").text = iso_to_rfc2822(datetime.utcnow().isoformat())
+        enclosure = ET.SubElement(item, "enclosure")
+        enclosure.set("url", "https://example.com/test.torrent")
+        enclosure.set("length", "123456789")
+        enclosure.set("type", "application/x-bittorrent")
+
+        return Response(content=ET.tostring(root, encoding="utf-8"),
+                        media_type="application/xml")
+
+    # ===== NORMAL SEARCH =====
     channel = ET.Element("rss", {"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"})
     ch = ET.SubElement(channel, "channel")
     ET.SubElement(ch, "title").text = "AniLibria Bridge"
@@ -203,7 +219,8 @@ def torznab(q: Optional[str] = Query(None),
 
     for res in fetched[:limit]:
         item = map_result_to_item(res)
-        if item is not None:  # ❗ только если enclosure есть
+        if item is not None:
             ch.append(item)
 
-    return Response(content=ET.tostring(channel, encoding="utf-8"), media_type="application/rss+xml")
+    return Response(content=ET.tostring(channel, encoding="utf-8"),
+                    media_type="application/rss+xml")
