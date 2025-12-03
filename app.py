@@ -4,7 +4,6 @@ from fastapi.responses import Response
 import requests
 import os
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from datetime import datetime
 from typing import Optional, List
 
@@ -27,7 +26,6 @@ SESSION.headers.update({"User-Agent": USER_AGENT})
 
 
 def safe_text(value) -> str:
-    """Преобразует любое значение в строку, безопасную для XML"""
     if isinstance(value, str):
         return value
     elif isinstance(value, (int, float)):
@@ -89,88 +87,30 @@ def fetch_anilibria(query: str, limit: int = 50, category: Optional[str] = None,
 
 def map_result_to_item(res: dict) -> ET.Element:
     item = ET.Element("item")
-
-    # title
-    title_field = res.get("title") or res.get("name") or res.get("rus") or res.get("eng") or res.get("full_title")
-    if isinstance(title_field, dict):
-        title = title_field.get("english") or title_field.get("main") or next(iter(title_field.values()))
-    else:
-        title = title_field
-    ET.SubElement(item, "title").text = safe_text(title) or "Unknown title"
-
-    # link
-    link = res.get("site_url") or res.get("url") or (f"https://www.anilibria.top/releases/{res.get('id')}" if res.get("id") else None)
-    if link:
-        ET.SubElement(item, "link").text = safe_text(link)
-
-    # guid
-    guid = res.get("id") or res.get("guid") or res.get("hash") or link or title
-    g = ET.SubElement(item, "guid")
-    g.text = safe_text(guid)
-    g.set("isPermaLink", "false")
-
-    # pubDate
-    pub = res.get("published") or res.get("created_at") or res.get("date") or res.get("pubDate")
-    ET.SubElement(item, "pubDate").text = iso_to_rfc2822(pub) if pub else datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-
-    # category
-    cat_field = res.get("genre") or res.get("type") or "Anime"
-    if isinstance(cat_field, dict):
-        cat_text = cat_field.get("value") or cat_field.get("name") or next(iter(cat_field.values()))
-    else:
-        cat_text = cat_field
-    ET.SubElement(item, "category").text = safe_text(cat_text)
-
-    # description
-    desc = res.get("description") or res.get("short_description") or res.get("announce") or ""
-    ET.SubElement(item, "description").text = safe_text(desc)
-
-    # thumb / poster
-    poster_field = res.get("poster") or res.get("image") or res.get("cover")
-    if isinstance(poster_field, dict):
-        poster_url = poster_field.get("src") or poster_field.get("preview") or poster_field.get("thumbnail")
-    else:
-        poster_url = poster_field
-    if poster_url:
-        ET.SubElement(item, "thumb").text = safe_text(poster_url)
-
-    # enclosure (torrent)
-    torrents = res.get(ANILIBRIA_TORRENT_FIELD) or res.get("torrents") or res.get("files") or []
-    if isinstance(torrents, dict):
-        torrents = list(torrents.values())
-    chosen = None
-    for t in torrents:
-        if isinstance(t, dict):
-            for k in ("url", "magnet", "link", "download"):
-                if k in t and t[k]:
-                    chosen = t
-                    break
-        elif isinstance(t, str):
-            chosen = {"url": t}
-        if chosen:
-            break
-    if chosen:
-        enclosure_url = chosen.get("url") or chosen.get("magnet") or chosen.get("link") or chosen.get("download")
-        if enclosure_url:
+    title = res.get("title") or res.get("name") or "Unknown title"
+    ET.SubElement(item, "title").text = safe_text(title)
+    link = res.get("site_url") or f"https://www.anilibria.top/releases/{res.get('id')}"
+    ET.SubElement(item, "link").text = safe_text(link)
+    guid = ET.SubElement(item, "guid")
+    guid.text = safe_text(res.get("id") or link)
+    guid.set("isPermaLink", "false")
+    pub = res.get("published") or datetime.utcnow().isoformat()
+    ET.SubElement(item, "pubDate").text = iso_to_rfc2822(pub)
+    ET.SubElement(item, "category").text = safe_text(res.get("genre") or "Anime")
+    ET.SubElement(item, "description").text = safe_text(res.get("description") or "")
+    poster = res.get("poster")
+    if poster:
+        ET.SubElement(item, "thumb").text = safe_text(poster)
+    # torrents
+    torrents = res.get(ANILIBRIA_TORRENT_FIELD) or []
+    if torrents:
+        t = torrents[0] if isinstance(torrents, list) else torrents
+        url = t.get("url") if isinstance(t, dict) else t
+        if url:
             e = ET.SubElement(item, "enclosure")
-            e.set("url", safe_text(enclosure_url))
-            e.set("length", str(chosen.get("size", 0)))
-            e.set("type", chosen.get("mime_type", "application/x-bittorrent") if isinstance(chosen, dict) else "application/x-bittorrent")
-
-    # seeders, leechers, infohash
-    size = chosen.get("size") if chosen else None
-    seeders = chosen.get("seeders") if chosen else None
-    leechers = chosen.get("leechers") if chosen else None
-    infohash = chosen.get("infoHash") if chosen else None
-    if infohash:
-        ET.SubElement(item, "torznab:attr", {"name": "infohash", "value": safe_text(infohash)})
-    if seeders is not None:
-        ET.SubElement(item, "seeders").text = str(seeders)
-    if leechers is not None:
-        ET.SubElement(item, "leechers").text = str(leechers)
-    if size:
-        ET.SubElement(item, "size").text = str(size)
-
+            e.set("url", safe_text(url))
+            e.set("length", str(t.get("size", 0) if isinstance(t, dict) else 0))
+            e.set("type", "application/x-bittorrent")
     return item
 
 
@@ -179,30 +119,35 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/capabilities")
-def capabilities():
-    root = ET.Element("caps")
-    server = ET.SubElement(root, "server")
-    ET.SubElement(server, "name").text = "AniLibria Torznab Bridge"
-    ET.SubElement(server, "version").text = "1.0"
-    ET.SubElement(server, "email").text = ""
-    ET.SubElement(server, "link").text = ANILIBRIA_BASE
-
-    categories = ET.SubElement(root, "categories")
-    for cid, info in CATEGORIES.items():
-        c = ET.SubElement(categories, "category", {"id": cid})
-        c.text = info["name"]
-
-    xml = ET.tostring(root, encoding="utf-8")
-    return Response(content=xml, media_type="application/xml")
-
-
 @app.get("/torznab")
-def torznab(q: Optional[str] = Query(None), t: Optional[str] = Query(None), limit: Optional[int] = Query(50),
-            cat: Optional[str] = Query(None), season: Optional[str] = Query(None),
-            ep: Optional[str] = Query(None), offset: Optional[int] = Query(0)):
+def torznab(q: Optional[str] = Query(None),
+            t: Optional[str] = Query(None),
+            limit: Optional[int] = Query(50),
+            cat: Optional[str] = Query(None),
+            season: Optional[str] = Query(None),
+            ep: Optional[str] = Query(None)):
 
-    query = q or t or ""
+    # Ответ на capabilities для Prowlarr
+    if t == "caps":
+        root = ET.Element("caps")
+        server = ET.SubElement(root, "server")
+        ET.SubElement(server, "title").text = "AniLibria Bridge"
+        ET.SubElement(server, "version").text = "1.0"
+        ET.SubElement(server, "email").text = ""
+        ET.SubElement(server, "baseUrl").text = "http://anilibria-torznab:8020/torznab"
+
+        limits = ET.SubElement(root, "limits")
+        ET.SubElement(limits, "max").text = "100"
+        ET.SubElement(limits, "default").text = "50"
+
+        cats = ET.SubElement(root, "categories")
+        for cid, info in CATEGORIES.items():
+            ET.SubElement(cats, "category", {"id": cid, "name": info["name"]})
+
+        return Response(content=ET.tostring(root, encoding="utf-8"), media_type="application/xml")
+
+    # Поиск по запросу
+    query = q or ""
     channel = ET.Element("rss", {"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"})
     ch = ET.SubElement(channel, "channel")
     ET.SubElement(ch, "title").text = "AniLibria Bridge"
@@ -221,5 +166,4 @@ def torznab(q: Optional[str] = Query(None), t: Optional[str] = Query(None), limi
         except Exception:
             continue
 
-    xml_bytes = ET.tostring(channel, encoding="utf-8")
-    return Response(content=xml_bytes, media_type="application/rss+xml")
+    return Response(content=ET.tostring(channel, encoding="utf-8"), media_type="application/rss+xml")
