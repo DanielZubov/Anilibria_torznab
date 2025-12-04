@@ -10,16 +10,45 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.2" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.3" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
+def fetch_latest_torrents(limit: int = 50) -> list:
+    """
+    Получает список последних торрентов (для RSS/теста Prowlarr).
+    API: GET /anime/torrents
+    """
+    url = f"{API_BASE}/anime/torrents"
+    headers = {"User-Agent": USER_AGENT}
+    base_params = {"limit": limit}
+
+    print(f"DEBUG: Using /anime/torrents endpoint for RSS/Latest.")
+    
+    try:
+        resp = requests.get(url, params=base_params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        items = data
+        if isinstance(data, dict):
+            items = data.get('torrents', data)
+        
+        if isinstance(items, dict):
+            items = list(items.values())
+        
+        return [item for item in items if isinstance(item, dict)]
+
+    except Exception as e:
+        print(f"ERROR: Fetching latest torrents failed: {e}")
+        return []
+
 def fetch_torrents_for_release(release_id: int) -> list:
     """
-    Получает данные о торрентах для конкретного ID релиза. 
-    (Функция временно не используется для поиска, но оставлена для RSS).
+    Получает данные о торрентах для конкретного ID релиза. (Шаг 2 Поиска)
+    API: GET /anime/torrents/release/{releaseId}
     """
     url = f"{API_BASE}/anime/torrents/release/{release_id}"
     headers = {"User-Agent": USER_AGENT}
@@ -29,14 +58,11 @@ def fetch_torrents_for_release(release_id: int) -> list:
         resp.raise_for_status()
         data = resp.json()
         
-        torrents_data = data 
-        
-        # Безопасное извлечение торрентов (исправление v2.1)
+        torrents_data = data
         if isinstance(data, dict):
             torrents_data = data.get('torrents', data)
         
         final_torrents = []
-
         if isinstance(torrents_data, dict):
             final_torrents = list(torrents_data.values())
         elif isinstance(torrents_data, list):
@@ -54,27 +80,22 @@ def fetch_torrents_for_release(release_id: int) -> list:
 
 def fetch_releases(query: str = None, limit: int = 50) -> list:
     """
-    Получает список релизов. Добавлено логирование сырых данных при 0 результатах.
+    Получает список релизов. (Шаг 1 Поиска)
     """
     headers = {"User-Agent": USER_AGENT}
     
     try:
         base_params = {"limit": limit}
 
-        if query:
-            url = f"{API_BASE}/app/search/releases"
-            base_params["query"] = query
-            print(f"DEBUG: Using SEARCH endpoint for query: '{query}'")
-        else:
-            url = f"{API_BASE}/anime/releases" 
-            print(f"DEBUG: Using GENERIC RELEASES endpoint for RSS/Latest")
+        url = f"{API_BASE}/app/search/releases"
+        base_params["query"] = query
+        print(f"DEBUG: Using SEARCH endpoint for query: '{query}'")
 
         resp = requests.get(url, params=base_params, headers=headers, timeout=15)
         resp.raise_for_status()
         
         data = resp.json()
         
-        # 1. Нормализация исходного списка
         items = []
         if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
             items = data["data"]
@@ -83,26 +104,19 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
         elif isinstance(data, dict):
             items = [data]
             
-        # 2. РЕКУРСИВНОЕ "РАЗГЛАЖИВАНИЕ"
         final_items = []
         
         def recursive_flatten(obj):
             """Рекурсивно извлекает все словари релизов из вложенных списков/словарей."""
             if isinstance(obj, dict):
-                # Специфическая структура поиска: релиз вложен в ключ 'release'
                 if "release" in obj and isinstance(obj["release"], dict):
                     final_items.append(obj["release"])
                     return
-                # Проверка, является ли сам словарь релизом (если есть ID и имя)
-                # Добавлено 'code' как дополнительный признак релиза, но главное - ID и NAME
                 if "id" in obj and "name" in obj:
                     final_items.append(obj)
                     return
-                
-                # Рекурсия по всем значениям словаря
                 for value in obj.values():
                     recursive_flatten(value)
-
             elif isinstance(obj, list):
                 for element in obj:
                     recursive_flatten(element)
@@ -111,19 +125,6 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
                                 
         print(f"DEBUG: API returned {len(items)} initial groups, recursively normalized to {len(final_items)} dict releases.")
         
-        # --- НОВОЕ ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ ---
-        if len(final_items) == 0 and isinstance(data, (list, dict)):
-            print(f"--- START RAW DATA DUMP ---")
-            print(f"WARNING: API returned 0 releases. Dumping raw data snippet for analysis.")
-            try:
-                # Логируем фрагмент, чтобы увидеть структуру
-                raw_snippet = json.dumps(data, indent=2, ensure_ascii=False)
-                print(f"RAW DATA SNIPPET (First 500 chars): {raw_snippet[:500]}...")
-            except Exception as e:
-                print(f"ERROR dumping raw data: {e}")
-            print(f"--- END RAW DATA DUMP ---")
-        # -------------------------------------
-
         return final_items
         
     except Exception as e:
@@ -193,7 +194,6 @@ async def torznab_endpoint(
     limit: int = Query(50),
     offset: int = Query(0)
 ):
-    # 1. CAPS - без изменений
     if t == "caps":
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
@@ -206,10 +206,35 @@ async def torznab_endpoint(
         ET.SubElement(categories, "category", id="5070", name="Anime")
         return Response(content=get_xml_bytes(root), media_type="application/xml")
 
-    # 2. SEARCH & RSS
     elif t in ["search", "tvsearch", "movie", "rss"]:
         
-        releases = fetch_releases(query=q, limit=limit)
+        items_to_process = []
+        
+        if q:
+            # --- ЛОГИКА ПОИСКА (ДВУХШАГОВЫЙ ПРОЦЕСС) ---
+            releases = fetch_releases(query=q, limit=limit)
+            
+            for release in releases:
+                release_id = release.get("id")
+                if not release_id:
+                    continue
+                
+                print(f"DEBUG: Two-step search: Fetching torrents for release ID {release_id}...")
+                torrents_list = fetch_torrents_for_release(release_id)
+                
+                for torrent in torrents_list:
+                    items_to_process.append((release, torrent))
+
+        else:
+            # --- ЛОГИКА RSS/Latest/Test (ОДНОШАГОВЫЙ ПРОЦЕСС) ---
+            # Используем /anime/torrents, который возвращает торренты со вложенными релизами
+            latest_torrents = fetch_latest_torrents(limit=limit)
+            
+            for torrent in latest_torrents:
+                release = torrent.get('release')
+                if release and isinstance(release, dict):
+                    items_to_process.append((release, torrent))
+        
         
         rss = ET.Element(
             "rss", 
@@ -220,43 +245,20 @@ async def torznab_endpoint(
         ET.SubElement(channel, "title").text = "AniLibria"
         
         generated_count = 0
-        for release in releases:
-            
-            release_id = release.get("id")
-            if not release_id:
-                continue
-
-            torrents_list = []
-            
-            if q:
-                # --- ЛОГИКА ПОИСКА (ДВУХШАГОВЫЙ ПРОЦЕСС) ---
-                print(f"DEBUG: Two-step search: Fetching torrents for release ID {release_id}...")
-                torrents_list = fetch_torrents_for_release(release_id)
-            else:
-                # --- ЛОГИКА RSS/Latest (ОДНОШАГОВЫЙ ПРОЦЕСС) ---
-                nested_torrents = release.get("torrents", {})
-                if isinstance(nested_torrents, dict):
-                    torrents_list = list(nested_torrents.values())
-                elif isinstance(nested_torrents, list):
-                    torrents_list = nested_torrents
-            
-            if not torrents_list:
-                continue
-
-            for torrent in torrents_list:
-                try:
-                    if not isinstance(torrent, dict):
-                        continue
-                        
-                    item = build_rss_item(release, torrent)
-                    channel.append(item)
-                    generated_count += 1
-                except Exception as e:
-                    print(f"ERROR building item: {e}")
+        for release, torrent in items_to_process:
+            try:
+                if not isinstance(torrent, dict):
+                    continue
+                    
+                item = build_rss_item(release, torrent)
+                channel.append(item)
+                generated_count += 1
+            except Exception as e:
+                print(f"ERROR building item: {e}")
 
         print(f"DEBUG: Generated {generated_count} XML items for Prowlarr.")
         
         return Response(content=get_xml_bytes(rss), media_type="application/xml")
 
     else:
-        return Response(content="Unknown functionality", status_code=400) 
+        return Response(content="Unknown functionality", status_code=400)
