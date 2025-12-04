@@ -10,11 +10,39 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.5" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.6" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
+
+# Новая функция для получения последних торрентов в формате JSON (для RSS/Test)
+def fetch_latest_torrents_json(limit: int = 50) -> list:
+    """Получает список последних торрентов (для RSS/Test Prowlarr)."""
+    url = f"{API_BASE}/anime/torrents"
+    headers = {"User-Agent": USER_AGENT}
+    base_params = {"limit": limit}
+
+    print(f"DEBUG: Using /anime/torrents JSON endpoint for RSS/Latest to ensure category tags are added.")
+    
+    try:
+        resp = requests.get(url, params=base_params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        items = data
+        if isinstance(data, dict):
+            items = data.get('torrents', data)
+        
+        if isinstance(items, dict):
+            items = list(items.values())
+        
+        # Фильтруем и возвращаем только словари с данными торрентов
+        return [item for item in items if isinstance(item, dict)]
+
+    except Exception as e:
+        print(f"ERROR: Fetching latest torrents failed: {e}")
+        return []
 
 def fetch_torrents_for_release(release_id: int) -> list:
     """Получает данные о торрентах для конкретного ID релиза. (Шаг 2 Поиска)"""
@@ -69,7 +97,7 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
         print(f"ERROR: Fetching data failed: {e}")
         return []
 
-# Функция build_rss_item() без изменений. Используется только для Поиска.
+# Функция build_rss_item() без изменений. Гарантирует наличие категории 5070.
 def build_rss_item(release, torrent):
     item = ET.Element("item")
     name_obj = release.get("name", {})
@@ -95,7 +123,7 @@ def build_rss_item(release, torrent):
     enc.set("length", str(size_bytes))
     enc.set("type", "application/x-bittorrent")
     ET.SubElement(item, "link").text = download_url
-    ET.SubElement(item, "category").text = "5070"
+    ET.SubElement(item, "category").text = "5070" # КРИТИЧЕСКИ ВАЖНЫЙ ТЕГ ДЛЯ PROWLARR
     pub_date_str = torrent.get("updated_at") or release.get("updated_at")
     if pub_date_str and isinstance(pub_date_str, str):
         try:
@@ -110,7 +138,7 @@ def build_rss_item(release, torrent):
     TORZNAB_NAMESPACE = "{http://torznab.com/schemas/2015/feed}"
     ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="seeders", value=str(seeders))
     ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="peers", value=str(leechers + seeders))
-    ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="category", value="5070")
+    ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="category", value="5070") # КРИТИЧЕСКИ ВАЖНЫЙ ТЕГ ДЛЯ PROWLARR
     poster = release.get("poster", {}).get("optimized", {}).get("src")
     if not poster:
         poster = release.get("poster", {}).get("src")
@@ -119,7 +147,6 @@ def build_rss_item(release, torrent):
              poster = "https://anilibria.top" + poster
         ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="poster", value=poster)
     return item
-# Конец функции build_rss_item()
 
 @app.get("/health")
 def health():
@@ -145,35 +172,42 @@ async def torznab_endpoint(
         ET.SubElement(categories, "category", id="5070", name="Anime")
         return Response(content=get_xml_bytes(root), media_type="application/xml")
 
-    # 2. RSS/Latest (t=search, q=None)
+    # 2. RSS/Latest (t=search, q=None) -- ИСПРАВЛЕН
     elif t in ["search", "tvsearch", "movie", "rss"] and not q:
-        # Prowlarr Test/RSS-запрос: просто делаем прокси к готовому RSS-фиду API
-        rss_url = f"{API_BASE}/anime/torrents/rss"
-        print(f"DEBUG: Proxying request to the official RSS feed: {rss_url}")
+        items_to_process = []
+        latest_torrents = fetch_latest_torrents_json(limit=limit) # Используем JSON
         
-        try:
-            resp = requests.get(rss_url, timeout=15)
-            resp.raise_for_status()
+        for torrent in latest_torrents:
+            release = torrent.get('release')
+            if release and isinstance(release, dict):
+                items_to_process.append((release, torrent))
             
-            # Внимание: API возвращает чистый XML, который мы просто передаем обратно.
-            return Response(content=resp.content, media_type="application/xml")
+        rss = ET.Element(
+            "rss", 
+            attrib={"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"}
+        )
+        channel = ET.SubElement(rss, "channel")
+        ET.SubElement(channel, "title").text = "AniLibria"
+        
+        generated_count = 0
+        for release, torrent in items_to_process:
+            try:
+                item = build_rss_item(release, torrent)
+                channel.append(item)
+                generated_count += 1
+            except Exception as e:
+                print(f"ERROR building item: {e}")
 
-        except Exception as e:
-            print(f"ERROR: Failed to fetch official RSS feed from {rss_url}: {e}")
-            # Возвращаем пустой, но валидный Torznab-ответ в случае ошибки
-            rss = ET.Element("rss", attrib={"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"})
-            channel = ET.SubElement(rss, "channel")
-            ET.SubElement(channel, "title").text = "AniLibria"
-            return Response(content=get_xml_bytes(rss), media_type="application/xml")
+        print(f"DEBUG: Generated {generated_count} XML items for Prowlarr/Sonarr RSS.")
+        return Response(content=get_xml_bytes(rss), media_type="application/xml")
 
 
-    # 3. SEARCH (t=search, q=exists)
+    # 3. SEARCH (t=search, q=exists) - без изменений, уже работает
     elif t in ["search", "tvsearch", "movie", "rss"] and q:
         
         releases = fetch_releases(query=q, limit=limit)
         items_to_process = []
         
-        # Двухшаговый процесс: поиск релиза -> получение торрентов
         for release in releases:
             release_id = release.get("id")
             if not release_id:
@@ -186,12 +220,10 @@ async def torznab_endpoint(
                 items_to_process.append((release, torrent))
         
         
-        # Генерация XML для результатов поиска
         rss = ET.Element(
             "rss", 
             attrib={"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"}
         )
-        
         channel = ET.SubElement(rss, "channel")
         ET.SubElement(channel, "title").text = "AniLibria"
         
@@ -207,9 +239,9 @@ async def torznab_endpoint(
             except Exception as e:
                 print(f"ERROR building item: {e}")
 
-        print(f"DEBUG: Generated {generated_count} XML items for Prowlarr.")
+        print(f"DEBUG: Generated {generated_count} XML items for Prowlarr Search.")
         
         return Response(content=get_xml_bytes(rss), media_type="application/xml")
 
     else:
-        return Response(content="Unknown functionality", status_code=400) 
+        return Response(content="Unknown functionality", status_code=400)
