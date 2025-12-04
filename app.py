@@ -10,18 +10,16 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.1" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.2" # Обновляем версию
 
 def get_xml_bytes(elem):
-    """
-    Превращает объект XML в байты для ответа, используя только ElementTree.
-    """
+    """Превращает объект XML в байты."""
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
 def fetch_torrents_for_release(release_id: int) -> list:
     """
-    Получает данные о торрентах для конкретного ID релиза.
-    API: GET /anime/torrents/release/{releaseId}
+    Получает данные о торрентах для конкретного ID релиза. 
+    (Функция временно не используется для поиска, но оставлена для RSS).
     """
     url = f"{API_BASE}/anime/torrents/release/{release_id}"
     headers = {"User-Agent": USER_AGENT}
@@ -31,24 +29,18 @@ def fetch_torrents_for_release(release_id: int) -> list:
         resp.raise_for_status()
         data = resp.json()
         
-        torrents_data = data # Исходные данные
+        torrents_data = data 
         
-        # --- ИСПРАВЛЕНИЕ: Безопасное извлечение торрентов ---
-        # 1. Если данные - словарь (dict), пытаемся извлечь по ключу 'torrents'
+        # Безопасное извлечение торрентов (исправление v2.1)
         if isinstance(data, dict):
-            # Используем .get() только на словаре. Если ключа 'torrents' нет, 
-            # считаем, что сам словарь содержит торренты (или список торрентов).
             torrents_data = data.get('torrents', data)
-        # 2. Если данные - список (list), то это и есть список торрентов, оставляем как есть.
         
         final_torrents = []
 
-        # 3. Нормализация в список словарей
         if isinstance(torrents_data, dict):
             final_torrents = list(torrents_data.values())
         elif isinstance(torrents_data, list):
             final_torrents = torrents_data
-        # ----------------------------------------------------
 
         cleaned_torrents = [t for t in final_torrents if isinstance(t, dict)]
         
@@ -62,7 +54,7 @@ def fetch_torrents_for_release(release_id: int) -> list:
 
 def fetch_releases(query: str = None, limit: int = 50) -> list:
     """
-    Шаг 1: Получает список релизов (с ID). (Без изменений)
+    Получает список релизов. Добавлено логирование сырых данных при 0 результатах.
     """
     headers = {"User-Agent": USER_AGENT}
     
@@ -82,6 +74,7 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
         
         data = resp.json()
         
+        # 1. Нормализация исходного списка
         items = []
         if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
             items = data["data"]
@@ -90,6 +83,7 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
         elif isinstance(data, dict):
             items = [data]
             
+        # 2. РЕКУРСИВНОЕ "РАЗГЛАЖИВАНИЕ"
         final_items = []
         
         def recursive_flatten(obj):
@@ -100,7 +94,8 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
                     final_items.append(obj["release"])
                     return
                 # Проверка, является ли сам словарь релизом (если есть ID и имя)
-                if "id" in obj and "name" in obj and "code" in obj:
+                # Добавлено 'code' как дополнительный признак релиза, но главное - ID и NAME
+                if "id" in obj and "name" in obj:
                     final_items.append(obj)
                     return
                 
@@ -116,6 +111,19 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
                                 
         print(f"DEBUG: API returned {len(items)} initial groups, recursively normalized to {len(final_items)} dict releases.")
         
+        # --- НОВОЕ ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ ---
+        if len(final_items) == 0 and isinstance(data, (list, dict)):
+            print(f"--- START RAW DATA DUMP ---")
+            print(f"WARNING: API returned 0 releases. Dumping raw data snippet for analysis.")
+            try:
+                # Логируем фрагмент, чтобы увидеть структуру
+                raw_snippet = json.dumps(data, indent=2, ensure_ascii=False)
+                print(f"RAW DATA SNIPPET (First 500 chars): {raw_snippet[:500]}...")
+            except Exception as e:
+                print(f"ERROR dumping raw data: {e}")
+            print(f"--- END RAW DATA DUMP ---")
+        # -------------------------------------
+
         return final_items
         
     except Exception as e:
@@ -124,44 +132,31 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
 
 # Функция build_rss_item() без изменений
 def build_rss_item(release, torrent):
-    """
-    Создает один <item> для XML из релиза и конкретного торрента.
-    """
     item = ET.Element("item")
-    
     name_obj = release.get("name", {})
     ru_title = name_obj.get("main", "Unknown")
     en_title = name_obj.get("english", "")
-    
     quality = "Unknown"
     if "quality" in torrent and isinstance(torrent["quality"], dict):
         quality = torrent["quality"].get("description", torrent["quality"].get("value", ""))
     elif "quality" in torrent:
          quality = str(torrent["quality"])
-    
     size_bytes = torrent.get("size", 0)
     torrent_id = torrent.get("id")
-    
     ep_info = torrent.get("description", "") 
     if not ep_info:
         ep_info = f"E{release.get('episodes_total', '?')}"
-        
     full_title = f"{ru_title} / {en_title} [{quality}] [{ep_info}]"
     ET.SubElement(item, "title").text = full_title
-    
     guid = ET.SubElement(item, "guid", isPermaLink="false")
     guid.text = f"anilibria-{torrent_id}"
-    
     download_url = f"{API_BASE}/anime/torrents/{torrent_id}/file"
-    
     enc = ET.SubElement(item, "enclosure")
     enc.set("url", download_url)
     enc.set("length", str(size_bytes))
     enc.set("type", "application/x-bittorrent")
     ET.SubElement(item, "link").text = download_url
-
     ET.SubElement(item, "category").text = "5070"
-    
     pub_date_str = torrent.get("updated_at") or release.get("updated_at")
     if pub_date_str and isinstance(pub_date_str, str):
         try:
@@ -171,15 +166,12 @@ def build_rss_item(release, torrent):
             ET.SubElement(item, "pubDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
     else:
         ET.SubElement(item, "pubDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-
     seeders = torrent.get("seeders", 0)
     leechers = torrent.get("leechers", 0)
     TORZNAB_NAMESPACE = "{http://torznab.com/schemas/2015/feed}"
-    
     ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="seeders", value=str(seeders))
     ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="peers", value=str(leechers + seeders))
     ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="category", value="5070")
-    
     poster = release.get("poster", {}).get("optimized", {}).get("src")
     if not poster:
         poster = release.get("poster", {}).get("src")
@@ -187,7 +179,6 @@ def build_rss_item(release, torrent):
         if poster.startswith("/"):
              poster = "https://anilibria.top" + poster
         ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="poster", value=poster)
-
     return item
 # Конец функции build_rss_item()
 
@@ -207,15 +198,12 @@ async def torznab_endpoint(
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
         ET.SubElement(server, "title").text = "AniLibria"
-        
         searching = ET.SubElement(root, "searching")
         ET.SubElement(searching, "search", available="yes", supportedParams="q")
         ET.SubElement(searching, "tv-search", available="yes", supportedParams="q,season,ep")
         ET.SubElement(searching, "movie-search", available="yes", supportedParams="q")
-        
         categories = ET.SubElement(root, "categories")
         ET.SubElement(categories, "category", id="5070", name="Anime")
-        
         return Response(content=get_xml_bytes(root), media_type="application/xml")
 
     # 2. SEARCH & RSS
@@ -246,7 +234,6 @@ async def torznab_endpoint(
                 torrents_list = fetch_torrents_for_release(release_id)
             else:
                 # --- ЛОГИКА RSS/Latest (ОДНОШАГОВЫЙ ПРОЦЕСС) ---
-                # Если торренты вложены в объект релиза.
                 nested_torrents = release.get("torrents", {})
                 if isinstance(nested_torrents, dict):
                     torrents_list = list(nested_torrents.values())
