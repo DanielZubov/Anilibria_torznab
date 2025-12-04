@@ -11,7 +11,7 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.3"
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.4"
 
 def get_xml_bytes(elem):
     """Превращает объект XML в красивые байты для ответа"""
@@ -21,8 +21,8 @@ def get_xml_bytes(elem):
 
 def fetch_releases(query: str = None, limit: int = 50):
     """
-    Запрос к API АниЛибрии с агрессивной нормализацией ответа.
-    Теперь ищет словари в глубине до 2 уровней вложенности списков.
+    Запрос к API АниЛибрии с рекурсивной нормализацией ответа.
+    Ищет словари (релизы) на любой глубине вложенности списков.
     """
     headers = {"User-Agent": USER_AGENT}
     
@@ -30,7 +30,6 @@ def fetch_releases(query: str = None, limit: int = 50):
         # Параметр include обязателен, чтобы получить данные о торрентах
         base_params = {"limit": limit, "include": "torrents"}
         
-        # Используем эндпоинт поиска, так как он более надежный, чем latest
         url = f"{API_BASE}/app/search/releases"
         if query:
             base_params["query"] = query
@@ -43,7 +42,14 @@ def fetch_releases(query: str = None, limit: int = 50):
         
         data = resp.json()
         
-        # 1. Нормализация исходного списка
+        # --- ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ ДЛЯ ДЕБАГА ---
+        print(f"DEBUG: Raw API Response Type: {type(data)}")
+        if isinstance(data, (list, dict)):
+            # Логируем фрагмент, чтобы избежать переполнения логов
+            print(f"DEBUG: Raw API Data Snippet (First 500 chars): {json.dumps(data, indent=2)[:500]}...")
+        # ------------------------------------------
+
+        # 1. Нормализация исходного списка (достаем из ключа 'data', если есть)
         items = []
         if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
             items = data["data"]
@@ -52,23 +58,20 @@ def fetch_releases(query: str = None, limit: int = 50):
         elif isinstance(data, dict):
             items = [data]
             
-        # 2. Агрессивное "Разглаживание": Ищем словари (релизы) внутри 2-х уровней списков
+        # 2. РЕКУРСИВНОЕ "РАЗГЛАЖИВАНИЕ"
         final_items = []
-        for item in items:
-            if isinstance(item, dict):
-                final_items.append(item)
-            elif isinstance(item, list):
-                # Первый уровень вложенности
-                for sub_item in item:
-                    if isinstance(sub_item, dict):
-                        final_items.append(sub_item)
-                    elif isinstance(sub_item, list):
-                        # Второй уровень вложенности (для таких структур как [[[dict], [dict]]])
-                        for sub_sub_item in sub_item:
-                            if isinstance(sub_sub_item, dict):
-                                final_items.append(sub_sub_item)
+        
+        def recursive_flatten(obj):
+            """Рекурсивно извлекает все словари из вложенных списков."""
+            if isinstance(obj, dict):
+                final_items.append(obj)
+            elif isinstance(obj, list):
+                for element in obj:
+                    recursive_flatten(element)
+
+        recursive_flatten(items)
                                 
-        print(f"DEBUG: API returned {len(items)} raw groups, normalized to {len(final_items)} dict releases.")
+        print(f"DEBUG: API returned {len(items)} initial items, recursively normalized to {len(final_items)} dict releases.")
         return final_items
         
     except Exception as e:
@@ -161,7 +164,7 @@ async def torznab_endpoint(
     limit: int = Query(50),
     offset: int = Query(0)
 ):
-    # 1. CAPS - без изменений
+    # 1. CAPS
     if t == "caps":
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
@@ -183,8 +186,6 @@ async def torznab_endpoint(
         # Форсируем запрос для прохождения теста Prowlarr'а
         forced_query = q
         if t == "search" and not q:
-            # Наруто - гарантированно существующий тайтл с торрентами. 
-            # Заменил на латиницу на всякий случай.
             forced_query = "Naruto"
             print(f"DEBUG: Prowlarr TEST DETECTED. Forcing search query: '{forced_query}'")
         
