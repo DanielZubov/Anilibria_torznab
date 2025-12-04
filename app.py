@@ -10,7 +10,7 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/4.0" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/5.2" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
@@ -30,12 +30,11 @@ def fetch_release_by_id(release_id: int) -> Optional[dict]:
 
 def fetch_latest_torrents(limit: int = 50) -> list:
     """Получает список последних торрентов в формате JSON (Шаг 1 RSS/Test)."""
-    # ИСПРАВЛЕНИЕ: Капим лимит до 50, так как limit=100 вызывает 422 ошибку в API AniLibria.
     api_limit = min(limit, 50) 
     
     url = f"{API_BASE}/anime/torrents"
     headers = {"User-Agent": USER_AGENT}
-    base_params = {"limit": api_limit} # Используем api_limit
+    base_params = {"limit": api_limit} 
     
     print(f"DEBUG: Using /anime/torrents JSON endpoint for RSS/Latest (API Limit: {api_limit}).")
     
@@ -121,12 +120,11 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
         print(f"ERROR: Fetching data failed: {e}")
         return []
 
-# ИЗМЕНЕНИЕ: Оптимизация заголовка
+# ИЗМЕНЕНИЕ: Оптимизация заголовка для парсера Sonarr
 def build_rss_item(release, torrent):
     item = ET.Element("item")
     name_obj = release.get("name", {})
-    # ru_title = name_obj.get("main", "Unknown") # Игнорируем русское название для парсинга
-    en_title = name_obj.get("english", name_obj.get("main", "Unknown Series")) # Берем английское, если есть
+    en_title = name_obj.get("english", name_obj.get("main", "Unknown Series")) # Берем английское название
     
     quality = "Unknown"
     if "quality" in torrent and isinstance(torrent["quality"], dict):
@@ -137,34 +135,49 @@ def build_rss_item(release, torrent):
     size_bytes = torrent.get("size", 0)
     torrent_id = torrent.get("id")
     
-    # Пытаемся получить информацию об эпизодах
-    ep_info = torrent.get("description", "") 
+    # 1. Base Title 
+    full_title = en_title.strip()
+    
+    # 2. Episode/Part Info
+    ep_info = torrent.get("description", "") or "" 
+    
+    # 2a. Удаляем русские слова/метки, которые ломают парсер (Фильм, Спешл, Часть и т.д.)
+    # Также удаляем лишний слэш, если он остался из старого формата названия
+    ep_info = (ep_info
+               .replace('[Фильм]', '')
+               .replace('[Спешл]', '')
+               .replace('[OVA]', '')
+               .replace('/', '')
+               .strip())
+    
     if not ep_info:
-        # Если описания нет, используем общее количество эпизодов для диапазона
+        # Если описания нет, пробуем использовать общее количество эпизодов для диапазона
         episodes_total = release.get('episodes_total')
         if episodes_total and episodes_total > 0:
-             ep_info = f"1-{episodes_total}"
+             ep_info = f"1-{episodes_total}" # Форматируем как диапазон AEN
         else:
-             ep_info = "" # Оставляем пустым, если не можем определить
-             
-    # ФОРМИРОВАНИЕ НОВОГО, ЧИСТОГО ЗАГОЛОВКА ДЛЯ ПАРСЕРА SONARR
-    
-    # 1. Base Title (Только английское название)
-    full_title = en_title
-    
-    # 2. Add Episode Info (SXXEXX или диапазон)
-    if ep_info:
-        # Добавляем информацию об эпизодах в скобках, если она есть
-        full_title += f" [{ep_info}]" 
+             ep_info = ""
 
-    # 3. Add Quality
+    # 2b. Форматируем оставшуюся информацию об эпизодах
+    if ep_info:
+        # Убираем все скобки из диапазона (например, [1-12] -> 1-12)
+        cleaned_ep_info = ep_info.strip().replace('[', '').replace(']', '').replace(' ', '')
+        
+        # Если это диапазон (напр. 1-12, 14-24), добавляем его без скобок (лучше для AEN парсинга Sonarr)
+        if any(char in cleaned_ep_info for char in ['-', ',']):
+            full_title += f" {cleaned_ep_info}" 
+        # Если это один эпизод, форматируем как E01
+        elif cleaned_ep_info.isdigit() and len(cleaned_ep_info) <= 3:
+            full_title += f" E{int(cleaned_ep_info):02d}"
+        # Если это текстовая метка (например, Ryuusui), оставляем ее в скобках
+        elif cleaned_ep_info:
+             full_title += f" [{cleaned_ep_info}]"
+
+    # 3. Add Quality (Всегда в скобках)
     if quality and quality != "Unknown":
         full_title += f" [{quality}]"
         
-    # Примеры (в зависимости от данных API):
-    # Dr. Stone: Science Future Part 2 [1-12] [1080p]
-    # Dr. Stone: Ryuusui [Фильм] [1080p]
-    
+    # --- Задаем TITLE ---
     ET.SubElement(item, "title").text = full_title
     
     # --- Остальная часть функции без изменений ---
@@ -229,7 +242,6 @@ async def torznab_endpoint(
     # 2. RSS/Latest (t=search, q=None) - Двухшаговый процесс
     elif t in ["search", "tvsearch", "movie", "rss"] and not q:
         items_to_process = []
-        # Вызываем с лимитом, который запросил Prowlarr/Sonarr (лимит внутри функции будет ограничен до 50)
         latest_torrents = fetch_latest_torrents(limit=limit) 
         
         for torrent in latest_torrents:
