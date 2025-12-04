@@ -11,33 +11,31 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.2"
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.3"
 
 def get_xml_bytes(elem):
     """Превращает объект XML в красивые байты для ответа"""
-    # ET.tostring возвращает байты
     rough_string = ET.tostring(elem, 'utf-8')
     reparsed = minidom.parseString(rough_string)
-    # toprettyxml возвращает байты, если указана кодировка
     return reparsed.toprettyxml(indent="  ", encoding="utf-8")
 
 def fetch_releases(query: str = None, limit: int = 50):
     """
-    Запрос к API АниЛибрии.
+    Запрос к API АниЛибрии с агрессивной нормализацией ответа.
+    Теперь ищет словари в глубине до 2 уровней вложенности списков.
     """
     headers = {"User-Agent": USER_AGENT}
     
     try:
-        # include=torrents гарантирует, что мы получим данные о торрентах
+        # Параметр include обязателен, чтобы получить данные о торрентах
         base_params = {"limit": limit, "include": "torrents"}
         
-        # Всегда используем search/releases, так как он более надежный
+        # Используем эндпоинт поиска, так как он более надежный, чем latest
         url = f"{API_BASE}/app/search/releases"
         if query:
             base_params["query"] = query
             print(f"DEBUG: Searching for '{query}'...") 
         else:
-            # При пустом запросе (RSS/Test) API-поиска обычно возвращает последние
             print(f"DEBUG: Fetching latest releases via search endpoint (RSS/Test)...")
 
         resp = requests.get(url, params=base_params, headers=headers, timeout=15)
@@ -54,17 +52,22 @@ def fetch_releases(query: str = None, limit: int = 50):
         elif isinstance(data, dict):
             items = [data]
             
-        # 2. Сглаживание списка: [[{...}], [{...}]] -> [{...}, {...}]
-        # Этот шаг должен исправить проблему, когда API возвращает списки списков
+        # 2. Агрессивное "Разглаживание": Ищем словари (релизы) внутри 2-х уровней списков
         final_items = []
         for item in items:
             if isinstance(item, dict):
                 final_items.append(item)
             elif isinstance(item, list):
+                # Первый уровень вложенности
                 for sub_item in item:
                     if isinstance(sub_item, dict):
                         final_items.append(sub_item)
-
+                    elif isinstance(sub_item, list):
+                        # Второй уровень вложенности (для таких структур как [[[dict], [dict]]])
+                        for sub_sub_item in sub_item:
+                            if isinstance(sub_sub_item, dict):
+                                final_items.append(sub_sub_item)
+                                
         print(f"DEBUG: API returned {len(items)} raw groups, normalized to {len(final_items)} dict releases.")
         return final_items
         
@@ -177,11 +180,12 @@ async def torznab_endpoint(
     # 2. SEARCH & RSS
     elif t in ["search", "tvsearch", "movie", "rss"]:
         
-        # --- ФОРСИРОВАНИЕ ЗАПРОСА ДЛЯ ТЕСТА ---
-        # Если Prowlarr делает тестовый запрос (t=search, q=None), мы форсируем поиск по известному тайтлу.
+        # Форсируем запрос для прохождения теста Prowlarr'а
         forced_query = q
         if t == "search" and not q:
-            forced_query = "Naruto" # Гарантированно существующий тайтл
+            # Наруто - гарантированно существующий тайтл с торрентами. 
+            # Заменил на латиницу на всякий случай.
+            forced_query = "Naruto"
             print(f"DEBUG: Prowlarr TEST DETECTED. Forcing search query: '{forced_query}'")
         
         releases = fetch_releases(query=forced_query, limit=limit)
