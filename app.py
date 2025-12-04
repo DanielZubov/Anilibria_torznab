@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import Response
 import requests
+# minidom больше не нужен, убираем импорт
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from datetime import datetime
 from typing import Optional
 import json
@@ -11,18 +11,20 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.5"
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.6"
 
 def get_xml_bytes(elem):
-    """Превращает объект XML в красивые байты для ответа"""
-    rough_string = ET.tostring(elem, 'utf-8')
-    reparsed = minidom.parseString(rough_string)
-    return reparsed.toprettyxml(indent="  ", encoding="utf-8")
+    """
+    Превращает объект XML в байты для ответа.
+    УДАЛЕНО minidom, чтобы избежать ошибки 'unbound prefix'.
+    """
+    # ET.tostring сам генерирует XML, включая объявление пространства имен и префиксов, 
+    # что решает проблему с minidom.
+    return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
 def fetch_releases(query: str = None, limit: int = 50):
     """
     Запрос к API АниЛибрии с рекурсивной нормализацией ответа.
-    Удаляет include=torrents для тестового запроса.
     """
     headers = {"User-Agent": USER_AGENT}
     
@@ -39,7 +41,6 @@ def fetch_releases(query: str = None, limit: int = 50):
         else:
             # 1б. RSS/Тест Prowlarr: используем latest endpoint БЕЗ torrents
             url = f"{API_BASE}/anime/releases/latest"
-            # ВНИМАНИЕ: параметр "include=torrents" убран для теста, чтобы получить результаты
             print(f"DEBUG: Using LATEST endpoint for RSS/Test (Include Torrents: False)")
 
         resp = requests.get(url, params=base_params, headers=headers, timeout=15)
@@ -71,10 +72,6 @@ def fetch_releases(query: str = None, limit: int = 50):
                                 
         print(f"DEBUG: API returned {len(items)} initial groups, recursively normalized to {len(final_items)} dict releases.")
         
-        # Для отладки, если все еще 0
-        if len(final_items) == 0:
-            print(f"DEBUG: Raw API Data Snippet (First 500 chars): {json.dumps(data, indent=2)[:500]}...")
-
         return final_items
         
     except Exception as e:
@@ -83,7 +80,7 @@ def fetch_releases(query: str = None, limit: int = 50):
 
 def build_rss_item(release, torrent=None):
     """
-    Создает один <item> для XML. Теперь torrent может быть None.
+    Создает один <item> для XML.
     """
     item = ET.Element("item")
     
@@ -92,12 +89,12 @@ def build_rss_item(release, torrent=None):
     ru_title = name_obj.get("main", "Unknown")
     en_title = name_obj.get("english", "")
     
-    # Если нет торрента, мы используем заглушки
+    # Если нет торрента (для тестовых заглушек)
     is_test_item = torrent is None
     
-    # Качество и размер
+    # Параметры по умолчанию для заглушек
     quality = "Unknown"
-    size_bytes = 100000000 # Заглушка 100MB
+    size_bytes = 100000000
     torrent_id = release.get("id", "test")
     ep_info = "" 
 
@@ -116,7 +113,6 @@ def build_rss_item(release, torrent=None):
         
     full_title = f"{ru_title} / {en_title} [{quality}] [{ep_info}]"
     
-    # Если это тестовый элемент, добавляем флаг, чтобы Prowlarr мог его игнорировать
     if is_test_item:
          full_title = f"[TEST_PASS_ONLY] {full_title}"
     
@@ -126,7 +122,7 @@ def build_rss_item(release, torrent=None):
     guid = ET.SubElement(item, "guid", isPermaLink="false")
     guid.text = f"anilibria-{torrent_id}-{'test' if is_test_item else 'real'}"
     
-    # Ссылка на файл (для теста используем заглушку)
+    # Ссылка на файл
     download_url = f"{API_BASE}/anime/torrents/{torrent_id}/file"
     
     enc = ET.SubElement(item, "enclosure")
@@ -150,12 +146,13 @@ def build_rss_item(release, torrent=None):
         ET.SubElement(item, "pubDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
     # Torznab attributes
-    seeders = torrent.get("seeders", 1) if torrent else 1 # Заглушка
-    leechers = torrent.get("leechers", 1) if torrent else 1 # Заглушка
+    seeders = torrent.get("seeders", 1) if torrent else 1
+    leechers = torrent.get("leechers", 1) if torrent else 1
     
-    ET.SubElement(item, "torznab:attr", name="seeders", value=str(seeders))
-    ET.SubElement(item, "torznab:attr", name="peers", value=str(leechers + seeders))
-    ET.SubElement(item, "torznab:attr", name="category", value="5070")
+    # !!! Используем префикс torznab: !!!
+    ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="seeders", value=str(seeders))
+    ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="peers", value=str(leechers + seeders))
+    ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="category", value="5070")
     
     # Постер
     poster = release.get("poster", {}).get("optimized", {}).get("src")
@@ -164,7 +161,7 @@ def build_rss_item(release, torrent=None):
     if poster:
         if poster.startswith("/"):
              poster = "https://anilibria.top" + poster
-        ET.SubElement(item, "torznab:attr", name="poster", value=poster)
+        ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="poster", value=poster)
 
     return item
 
@@ -179,7 +176,7 @@ async def torznab_endpoint(
     limit: int = Query(50),
     offset: int = Query(0)
 ):
-    # 1. CAPS - без изменений
+    # 1. CAPS
     if t == "caps":
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
@@ -200,7 +197,12 @@ async def torznab_endpoint(
         
         releases = fetch_releases(query=q, limit=limit)
         
-        rss = ET.Element("rss", version="2.0", xmlns_torznab="http://torznab.com/schemas/2015/feed")
+        # !!! Правильное определение пространства имен Torznab !!!
+        rss = ET.Element(
+            "rss", 
+            attrib={"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"}
+        )
+        
         channel = ET.SubElement(rss, "channel")
         ET.SubElement(channel, "title").text = "AniLibria"
         
