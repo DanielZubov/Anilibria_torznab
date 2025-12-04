@@ -216,7 +216,7 @@ async def torznab_endpoint(
                 torrents_list = list(torrents_list.values())
             
             if torrents_list:
-                # Если торренты есть (для реального поиска), обрабатываем их
+                # Если торренты есть (для реального поиска), обрабатываем их 
                 for torrent in torrents_list:
                     try:
                         if not isinstance(torrent, dict):
