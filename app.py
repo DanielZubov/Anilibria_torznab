@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import Response
 import requests
-# minidom больше не нужен, убираем импорт
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Optional
@@ -11,37 +10,38 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.6"
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.8"
 
 def get_xml_bytes(elem):
     """
-    Превращает объект XML в байты для ответа.
-    УДАЛЕНО minidom, чтобы избежать ошибки 'unbound prefix'.
+    Превращает объект XML в байты для ответа, используя только ElementTree, 
+    чтобы избежать ошибки 'unbound prefix'.
     """
-    # ET.tostring сам генерирует XML, включая объявление пространства имен и префиксов, 
-    # что решает проблему с minidom.
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
 def fetch_releases(query: str = None, limit: int = 50):
     """
-    Запрос к API АниЛибрии с рекурсивной нормализацией ответа.
+    Запрос к API АниЛибрии. Использует search endpoint, если есть query,
+    и latest endpoint, если query отсутствует.
     """
     headers = {"User-Agent": USER_AGENT}
     
     try:
         base_params = {"limit": limit}
-        
+
         # 1. Определяем эндпоинт и параметры
         if query:
-            # 1а. Поиск (Sonarr/Radarr): используем search endpoint с torrents
+            # 1а. Поиск (Sonarr/Radarr/Prowlarr Search): используем search endpoint с torrents
             url = f"{API_BASE}/app/search/releases"
             base_params["query"] = query
             base_params["include"] = "torrents" 
             print(f"DEBUG: Using SEARCH endpoint for query: '{query}' (Include Torrents: True)")
         else:
-            # 1б. RSS/Тест Prowlarr: используем latest endpoint БЕЗ torrents
+            # 1б. RSS/Latest (Test / Initial Search): используем latest endpoint с torrents
+            # Если API не может вернуть торренты здесь, Prowlarr/Sonarr просто не найдут последних релизов.
             url = f"{API_BASE}/anime/releases/latest"
-            print(f"DEBUG: Using LATEST endpoint for RSS/Test (Include Torrents: False)")
+            base_params["include"] = "torrents" 
+            print(f"DEBUG: Using LATEST endpoint for RSS/Latest (Include Torrents: True)")
 
         resp = requests.get(url, params=base_params, headers=headers, timeout=15)
         resp.raise_for_status()
@@ -78,9 +78,9 @@ def fetch_releases(query: str = None, limit: int = 50):
         print(f"ERROR: Fetching data failed: {e}")
         return []
 
-def build_rss_item(release, torrent=None):
+def build_rss_item(release, torrent):
     """
-    Создает один <item> для XML.
+    Создает один <item> для XML из релиза и конкретного торрента.
     """
     item = ET.Element("item")
     
@@ -89,38 +89,27 @@ def build_rss_item(release, torrent=None):
     ru_title = name_obj.get("main", "Unknown")
     en_title = name_obj.get("english", "")
     
-    # Если нет торрента (для тестовых заглушек)
-    is_test_item = torrent is None
-    
-    # Параметры по умолчанию для заглушек
+    # Качество и размер
     quality = "Unknown"
-    size_bytes = 100000000
-    torrent_id = release.get("id", "test")
-    ep_info = "" 
-
-    if torrent:
-        if "quality" in torrent and isinstance(torrent["quality"], dict):
-            quality = torrent["quality"].get("description", torrent["quality"].get("value", ""))
-        elif "quality" in torrent:
-            quality = str(torrent["quality"])
-        
-        size_bytes = torrent.get("size", 0)
-        torrent_id = torrent.get("id")
-        ep_info = torrent.get("description", "") 
+    if "quality" in torrent and isinstance(torrent["quality"], dict):
+        quality = torrent["quality"].get("description", torrent["quality"].get("value", ""))
+    elif "quality" in torrent:
+         quality = str(torrent["quality"])
     
+    size_bytes = torrent.get("size", 0)
+    torrent_id = torrent.get("id")
+    
+    # Информация о сериях
+    ep_info = torrent.get("description", "") 
     if not ep_info:
         ep_info = f"E{release.get('episodes_total', '?')}"
         
     full_title = f"{ru_title} / {en_title} [{quality}] [{ep_info}]"
-    
-    if is_test_item:
-         full_title = f"[TEST_PASS_ONLY] {full_title}"
-    
     ET.SubElement(item, "title").text = full_title
     
     # GUID (Уникальный ID)
     guid = ET.SubElement(item, "guid", isPermaLink="false")
-    guid.text = f"anilibria-{torrent_id}-{'test' if is_test_item else 'real'}"
+    guid.text = f"anilibria-{torrent_id}"
     
     # Ссылка на файл
     download_url = f"{API_BASE}/anime/torrents/{torrent_id}/file"
@@ -135,7 +124,7 @@ def build_rss_item(release, torrent=None):
     ET.SubElement(item, "category").text = "5070"
     
     # Дата
-    pub_date_str = (torrent.get("updated_at") if torrent else None) or release.get("updated_at")
+    pub_date_str = torrent.get("updated_at") or release.get("updated_at")
     if pub_date_str and isinstance(pub_date_str, str):
         try:
             dt = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
@@ -145,14 +134,14 @@ def build_rss_item(release, torrent=None):
     else:
         ET.SubElement(item, "pubDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
-    # Torznab attributes
-    seeders = torrent.get("seeders", 1) if torrent else 1
-    leechers = torrent.get("leechers", 1) if torrent else 1
+    # Torznab attributes (с использованием полного namespace)
+    seeders = torrent.get("seeders", 0)
+    leechers = torrent.get("leechers", 0)
+    TORZNAB_NAMESPACE = "{http://torznab.com/schemas/2015/feed}"
     
-    # !!! Используем префикс torznab: !!!
-    ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="seeders", value=str(seeders))
-    ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="peers", value=str(leechers + seeders))
-    ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="category", value="5070")
+    ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="seeders", value=str(seeders))
+    ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="peers", value=str(leechers + seeders))
+    ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="category", value="5070")
     
     # Постер
     poster = release.get("poster", {}).get("optimized", {}).get("src")
@@ -161,7 +150,7 @@ def build_rss_item(release, torrent=None):
     if poster:
         if poster.startswith("/"):
              poster = "https://anilibria.top" + poster
-        ET.SubElement(item, "{http://torznab.com/schemas/2015/feed}attr", name="poster", value=poster)
+        ET.SubElement(item, TORZNAB_NAMESPACE + "attr", name="poster", value=poster)
 
     return item
 
@@ -197,7 +186,7 @@ async def torznab_endpoint(
         
         releases = fetch_releases(query=q, limit=limit)
         
-        # !!! Правильное определение пространства имен Torznab !!!
+        # Правильное определение пространства имен Torznab
         rss = ET.Element(
             "rss", 
             attrib={"version": "2.0", "xmlns:torznab": "http://torznab.com/schemas/2015/feed"}
@@ -215,26 +204,21 @@ async def torznab_endpoint(
             if isinstance(torrents_list, dict):
                 torrents_list = list(torrents_list.values())
             
-            if torrents_list:
-                # Если торренты есть (для реального поиска), обрабатываем их 
-                for torrent in torrents_list:
-                    try:
-                        if not isinstance(torrent, dict):
-                            continue
-                            
-                        item = build_rss_item(release, torrent)
-                        channel.append(item)
-                        generated_count += 1
-                    except Exception as e:
-                        print(f"ERROR building item: {e}")
-            elif not q:
-                # Если торрентов нет, и это тестовый запрос (q=None), создаем заглушку
+            # Теперь, если торрентов нет, мы просто пропускаем этот элемент. 
+            # Это гарантирует, что мы возвращаем только валидные торренты.
+            if not torrents_list:
+                continue
+
+            for torrent in torrents_list:
                 try:
-                    item = build_rss_item(release, torrent=None)
+                    if not isinstance(torrent, dict):
+                        continue
+                        
+                    item = build_rss_item(release, torrent)
                     channel.append(item)
                     generated_count += 1
                 except Exception as e:
-                    print(f"ERROR building TEST item: {e}")
+                    print(f"ERROR building item: {e}")
 
         print(f"DEBUG: Generated {generated_count} XML items for Prowlarr.")
         
