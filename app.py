@@ -10,22 +10,46 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/5.2" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/5.4" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
-def fetch_release_by_id(release_id: int) -> Optional[dict]:
-    """Получает полный объект релиза по его ID."""
-    url = f"{API_BASE}/anime/releases/{release_id}" 
+# НОВАЯ ФУНКЦИЯ: Получает только метаданные релиза (для RSS/Latest)
+def fetch_release_metadata(release_id: int) -> Optional[dict]:
+    """
+    Получает необходимые метаданные релиза по его ID. 
+    Используется для RSS/Latest, чтобы получить контекст для каждого недавно вышедшего торрента.
+    """
+    # Используем include для минимально необходимых полей
+    fields_to_include = "id,name,alias,poster,episodes_total,updated_at"
+    url = f"{API_BASE}/anime/releases/{release_id}?include={fields_to_include}&exclude=description,franchises,torrents"
     headers = {"User-Agent": USER_AGENT}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"ERROR: Failed to fetch full release {release_id}: {e}") 
+        print(f"ERROR: Failed to fetch release metadata {release_id}: {e}") 
+        return None
+
+# НОВАЯ ФУНКЦИЯ: Получает релиз и все его торренты в одном запросе (для Search)
+def fetch_release_with_torrents(release_id: int) -> Optional[dict]:
+    """
+    Получает полный объект релиза и все его торренты в одном запросе.
+    Используется для Search.
+    """
+    # Используем include=torrents, чтобы получить все в одном запросе
+    fields_to_include = "id,name,alias,poster,episodes_total,updated_at,torrents"
+    url = f"{API_BASE}/anime/releases/{release_id}?include={fields_to_include}&exclude=description,franchises"
+    headers = {"User-Agent": USER_AGENT}
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"ERROR: Failed to fetch full release with torrents {release_id}: {e}") 
         return None
 
 def fetch_latest_torrents(limit: int = 50) -> list:
@@ -67,31 +91,8 @@ def fetch_latest_torrents(limit: int = 50) -> list:
         print(f"ERROR: Fetching latest torrents failed: {e}")
         return []
 
-def fetch_torrents_for_release(release_id: int) -> list:
-    """Получает данные о торрентах для конкретного ID релиза. (Шаг 2 Поиска)"""
-    url = f"{API_BASE}/anime/torrents/release/{release_id}"
-    headers = {"User-Agent": USER_AGENT}
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        torrents_data = data
-        if isinstance(data, dict):
-            torrents_data = data.get('torrents', data)
-        final_torrents = []
-        if isinstance(torrents_data, dict):
-            final_torrents = list(torrents_data.values())
-        elif isinstance(torrents_data, list):
-            final_torrents = torrents_data
-        cleaned_torrents = [t for t in final_torrents if isinstance(t, dict)]
-        print(f"DEBUG: Found {len(cleaned_torrents)} torrents for release ID {release_id}.")
-        return cleaned_torrents
-    except Exception as e:
-        print(f"ERROR: Failed to fetch torrents for release {release_id}: {e}")
-        return []
-
 def fetch_releases(query: str = None, limit: int = 50) -> list:
-    """Получает список релизов. (Шаг 1 Поиска)"""
+    """Получает список релизов по поисковому запросу. (Шаг 1 Поиска)"""
     headers = {"User-Agent": USER_AGENT}
     try:
         url = f"{API_BASE}/app/search/releases"
@@ -120,11 +121,10 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
         print(f"ERROR: Fetching data failed: {e}")
         return []
 
-# ИЗМЕНЕНИЕ: Оптимизация заголовка для парсера Sonarr
 def build_rss_item(release, torrent):
     item = ET.Element("item")
     name_obj = release.get("name", {})
-    en_title = name_obj.get("english", name_obj.get("main", "Unknown Series")) # Берем английское название
+    en_title = name_obj.get("english", name_obj.get("main", "Unknown Series")) 
     
     quality = "Unknown"
     if "quality" in torrent and isinstance(torrent["quality"], dict):
@@ -141,8 +141,7 @@ def build_rss_item(release, torrent):
     # 2. Episode/Part Info
     ep_info = torrent.get("description", "") or "" 
     
-    # 2a. Удаляем русские слова/метки, которые ломают парсер (Фильм, Спешл, Часть и т.д.)
-    # Также удаляем лишний слэш, если он остался из старого формата названия
+    # 2a. Удаляем русские слова/метки
     ep_info = (ep_info
                .replace('[Фильм]', '')
                .replace('[Спешл]', '')
@@ -151,10 +150,10 @@ def build_rss_item(release, torrent):
                .strip())
     
     if not ep_info:
-        # Если описания нет, пробуем использовать общее количество эпизодов для диапазона
         episodes_total = release.get('episodes_total')
         if episodes_total and episodes_total > 0:
-             ep_info = f"1-{episodes_total}" # Форматируем как диапазон AEN
+             # Если описание пустое, но есть episodes_total, используем AEN-пак 1-XX
+             ep_info = f"1-{episodes_total}" 
         else:
              ep_info = ""
 
@@ -173,14 +172,17 @@ def build_rss_item(release, torrent):
         elif cleaned_ep_info:
              full_title += f" [{cleaned_ep_info}]"
 
-    # 3. Add Quality (Всегда в скобках)
+    # --- НОВОЕ: ЯВНО ДОБАВЛЯЕМ РУССКИЙ ЯЗЫК ДЛЯ SONARR/PROWLARR (ОСНОВНАЯ ЦЕЛЬ ЭТОЙ ВЕРСИИ) ---
+    full_title += " [Rus]"
+    
+    # 3. Add Quality 
     if quality and quality != "Unknown":
         full_title += f" [{quality}]"
         
     # --- Задаем TITLE ---
     ET.SubElement(item, "title").text = full_title
     
-    # --- Остальная часть функции без изменений ---
+    # --- Остальная часть функции ---
     guid = ET.SubElement(item, "guid", isPermaLink="false")
     guid.text = f"anilibria-{torrent_id}"
     download_url = f"{API_BASE}/anime/torrents/{torrent_id}/file"
@@ -225,7 +227,7 @@ async def torznab_endpoint(
     limit: int = Query(50),
     offset: int = Query(0)
 ):
-    # 1. CAPS - Поддерживаем 5000 и 5070
+    # 1. CAPS - Без изменений
     if t == "caps":
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
@@ -239,7 +241,7 @@ async def torznab_endpoint(
         ET.SubElement(categories, "category", id="5070", name="Anime")
         return Response(content=get_xml_bytes(root), media_type="application/xml")
 
-    # 2. RSS/Latest (t=search, q=None) - Двухшаговый процесс
+    # 2. RSS/Latest (t=search, q=None) - Используем fetch_release_metadata
     elif t in ["search", "tvsearch", "movie", "rss"] and not q:
         items_to_process = []
         latest_torrents = fetch_latest_torrents(limit=limit) 
@@ -251,7 +253,8 @@ async def torznab_endpoint(
                 print(f"WARNING: Torrent {torrent.get('id')} lacks required release_id. Skipping.")
                 continue
 
-            release = fetch_release_by_id(release_id)
+            # ИСПОЛЬЗУЕМ НОВУЮ ФУНКЦИЮ (оптимизированный N+1 запрос)
+            release = fetch_release_metadata(release_id) 
             
             if release:
                 items_to_process.append((release, torrent))
@@ -276,22 +279,29 @@ async def torznab_endpoint(
         return Response(content=get_xml_bytes(rss), media_type="application/xml")
 
 
-    # 3. SEARCH (t=search, q=exists) - работает
+    # 3. SEARCH (t=search, q=exists) - Используем fetch_release_with_torrents
     elif t in ["search", "tvsearch", "movie", "rss"] and q:
         
-        releases = fetch_releases(query=q, limit=limit)
+        # Шаг 1: Ищем релизы по запросу
+        release_summaries = fetch_releases(query=q, limit=limit)
         items_to_process = []
         
-        for release in releases:
-            release_id = release.get("id")
+        # Шаг 2: Для каждого релиза получаем полный объект с торрентами ОДНИМ запросом (ОПТИМИЗАЦИЯ!)
+        for release_summary in release_summaries:
+            release_id = release_summary.get("id")
             if not release_id:
                 continue
             
-            print(f"DEBUG: Two-step search: Fetching torrents for release ID {release_id}...")
-            torrents_list = fetch_torrents_for_release(release_id)
+            print(f"DEBUG: Two-step search: Fetching full release with torrents for ID {release_id}...")
             
-            for torrent in torrents_list:
-                items_to_process.append((release, torrent))
+            full_release = fetch_release_with_torrents(release_id)
+            
+            if full_release and 'torrents' in full_release:
+                torrents_list = full_release['torrents']
+                
+                for torrent in torrents_list:
+                    # Теперь передаем полный объект релиза в build_rss_item
+                    items_to_process.append((full_release, torrent))
         
         
         rss = ET.Element(
