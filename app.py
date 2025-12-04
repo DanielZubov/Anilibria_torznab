@@ -212,4 +212,4 @@ async def torznab_endpoint(
         return Response(content=get_xml_bytes(rss), media_type="application/xml")
 
     else:
-        return Response(content="Unknown functionality", status_code=400)
+        return Response(content="Unknown functionality", status_code=400) 
