@@ -10,15 +10,15 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.9" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/3.0" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
 def fetch_release_by_id(release_id: int) -> Optional[dict]:
-    """Получает полный объект релиза по его ID. (Исправлен URL)"""
-    # ИСПРАВЛЕНО: Теперь используется правильный путь: /anime/releases/{id}
+    """Получает полный объект релиза по его ID."""
+    # Правильный путь: /anime/releases/{id}
     url = f"{API_BASE}/anime/releases/{release_id}" 
     headers = {"User-Agent": USER_AGENT}
     try:
@@ -26,7 +26,8 @@ def fetch_release_by_id(release_id: int) -> Optional[dict]:
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"ERROR: Failed to fetch full release {release_id}: {e}")
+        # Не удаляем print, он полезен для отладки пропущенных релизов
+        print(f"ERROR: Failed to fetch full release {release_id}: {e}") 
         return None
 
 def fetch_latest_torrents(limit: int = 50) -> list:
@@ -44,11 +45,9 @@ def fetch_latest_torrents(limit: int = 50) -> list:
         
         items = []
         
-        # 1. Приоритетное извлечение из ключа 'data' (как в вашем логе)
         if isinstance(data, dict) and 'data' in data:
             items = data['data']
         
-        # 2. Обработка старого формата или корневого словаря с 'torrents'
         if not items and isinstance(data, dict):
             items_candidate = data.get('torrents', data)
             if isinstance(items_candidate, dict):
@@ -59,7 +58,6 @@ def fetch_latest_torrents(limit: int = 50) -> list:
         if not isinstance(items, list):
             items = []
 
-        # Фильтруем для надежности
         final_items = [item for item in items if isinstance(item, dict) and 'id' in item]
 
         print(f"DEBUG: Successfully retrieved {len(final_items)} torrents from /anime/torrents.")
@@ -184,7 +182,7 @@ async def torznab_endpoint(
     limit: int = Query(50),
     offset: int = Query(0)
 ):
-    # 1. CAPS - без изменений
+    # 1. CAPS - ИСПРАВЛЕНО
     if t == "caps":
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
@@ -194,23 +192,23 @@ async def torznab_endpoint(
         ET.SubElement(searching, "tv-search", available="yes", supportedParams="q,season,ep")
         ET.SubElement(searching, "movie-search", available="yes", supportedParams="q")
         categories = ET.SubElement(root, "categories")
+        # Добавляем общую категорию 5000 (TV) для прохождения валидации Sonarr
+        ET.SubElement(categories, "category", id="5000", name="TV") 
         ET.SubElement(categories, "category", id="5070", name="Anime")
         return Response(content=get_xml_bytes(root), media_type="application/xml")
 
     # 2. RSS/Latest (t=search, q=None) - Двухшаговый процесс
     elif t in ["search", "tvsearch", "movie", "rss"] and not q:
         items_to_process = []
-        latest_torrents = fetch_latest_torrents(limit=limit) # Шаг 1: Получаем список торрентов
+        latest_torrents = fetch_latest_torrents(limit=limit) 
         
         for torrent in latest_torrents:
-            # Пытаемся получить ID релиза из торрента
             release_id = torrent.get('release_id') or torrent.get('release', {}).get('id')
             
             if not release_id:
                 print(f"WARNING: Torrent {torrent.get('id')} lacks required release_id. Skipping.")
                 continue
 
-            # Шаг 2: Получаем полный объект релиза (используя исправленный URL)
             release = fetch_release_by_id(release_id)
             
             if release:
@@ -278,4 +276,4 @@ async def torznab_endpoint(
         return Response(content=get_xml_bytes(rss), media_type="application/xml")
 
     else:
-        return Response(content="Unknown functionality", status_code=400) 
+        return Response(content="Unknown functionality", status_code=400)
