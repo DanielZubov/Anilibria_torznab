@@ -10,15 +10,16 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.8" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.9" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
 def fetch_release_by_id(release_id: int) -> Optional[dict]:
-    """Получает полный объект релиза по его ID."""
-    url = f"{API_BASE}/anime/release/{release_id}"
+    """Получает полный объект релиза по его ID. (Исправлен URL)"""
+    # ИСПРАВЛЕНО: Теперь используется правильный путь: /anime/releases/{id}
+    url = f"{API_BASE}/anime/releases/{release_id}" 
     headers = {"User-Agent": USER_AGENT}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
@@ -209,7 +210,7 @@ async def torznab_endpoint(
                 print(f"WARNING: Torrent {torrent.get('id')} lacks required release_id. Skipping.")
                 continue
 
-            # Шаг 2: Получаем полный объект релиза
+            # Шаг 2: Получаем полный объект релиза (используя исправленный URL)
             release = fetch_release_by_id(release_id)
             
             if release:
