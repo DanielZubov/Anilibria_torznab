@@ -10,11 +10,7 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-<<<<<<< HEAD
 USER_AGENT = "AniLiberty-Prowlarr-Bridge/3.1" # Обновляем версию
-=======
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/3.0" # Обновляем версию
->>>>>>> 2764df9525ab7cb7bf6e102b00025a44e42be2e2
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
@@ -22,10 +18,6 @@ def get_xml_bytes(elem):
 
 def fetch_release_by_id(release_id: int) -> Optional[dict]:
     """Получает полный объект релиза по его ID."""
-<<<<<<< HEAD
-=======
-    # Правильный путь: /anime/releases/{id}
->>>>>>> 2764df9525ab7cb7bf6e102b00025a44e42be2e2
     url = f"{API_BASE}/anime/releases/{release_id}" 
     headers = {"User-Agent": USER_AGENT}
     try:
@@ -33,10 +25,6 @@ def fetch_release_by_id(release_id: int) -> Optional[dict]:
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-<<<<<<< HEAD
-=======
-        # Не удаляем print, он полезен для отладки пропущенных релизов
->>>>>>> 2764df9525ab7cb7bf6e102b00025a44e42be2e2
         print(f"ERROR: Failed to fetch full release {release_id}: {e}") 
         return None
 
@@ -195,11 +183,7 @@ async def torznab_endpoint(
     limit: int = Query(50),
     offset: int = Query(0)
 ):
-<<<<<<< HEAD
     # 1. CAPS - Поддерживаем 5000 и 5070
-=======
-    # 1. CAPS - ИСПРАВЛЕНО
->>>>>>> 2764df9525ab7cb7bf6e102b00025a44e42be2e2
     if t == "caps":
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
@@ -209,10 +193,6 @@ async def torznab_endpoint(
         ET.SubElement(searching, "tv-search", available="yes", supportedParams="q,season,ep")
         ET.SubElement(searching, "movie-search", available="yes", supportedParams="q")
         categories = ET.SubElement(root, "categories")
-<<<<<<< HEAD
-=======
-        # Добавляем общую категорию 5000 (TV) для прохождения валидации Sonarr
->>>>>>> 2764df9525ab7cb7bf6e102b00025a44e42be2e2
         ET.SubElement(categories, "category", id="5000", name="TV") 
         ET.SubElement(categories, "category", id="5070", name="Anime")
         return Response(content=get_xml_bytes(root), media_type="application/xml")
@@ -220,10 +200,7 @@ async def torznab_endpoint(
     # 2. RSS/Latest (t=search, q=None) - Двухшаговый процесс
     elif t in ["search", "tvsearch", "movie", "rss"] and not q:
         items_to_process = []
-<<<<<<< HEAD
         # Вызываем с лимитом, который запросил Prowlarr/Sonarr (лимит внутри функции будет ограничен до 50)
-=======
->>>>>>> 2764df9525ab7cb7bf6e102b00025a44e42be2e2
         latest_torrents = fetch_latest_torrents(limit=limit) 
         
         for torrent in latest_torrents:
