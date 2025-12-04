@@ -11,7 +11,7 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.0"
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.1"
 
 def get_xml_bytes(elem):
     """Превращает объект XML в красивые байты для ответа"""
@@ -21,7 +21,8 @@ def get_xml_bytes(elem):
 
 def fetch_releases(query: str = None, limit: int = 50):
     """
-    Запрос к API АниЛибрии.
+    Запрос к API АниЛибрии с нормализацией ответа.
+    ВАЖНО: Добавлен параметр include=torrents и логика сглаживания списка.
     """
     headers = {"User-Agent": USER_AGENT}
     
@@ -35,7 +36,7 @@ def fetch_releases(query: str = None, limit: int = 50):
             base_params["query"] = query
             print(f"DEBUG: Searching for '{query}'...") 
         else:
-            # RSS (Лента новинок)
+            # RSS (Лента новинок) - используется Prowlarr'ом для теста
             url = f"{API_BASE}/anime/releases/latest"
             print(f"DEBUG: Fetching latest releases (RSS)...")
 
@@ -44,41 +45,41 @@ def fetch_releases(query: str = None, limit: int = 50):
         
         data = resp.json()
         
+        # 1. Нормализация исходного списка
         items = []
-        # Логика обработки разных вариантов ответа API
-        if isinstance(data, dict):
-            if "data" in data and isinstance(data["data"], list):
-                items = data["data"]
-            else:
-                # Если вернулся один объект или странная структура, попробуем обернуть
-                # Но для начала логируем, чтобы понять структуру
-                # print(f"DEBUG: Raw dict response keys: {data.keys()}")
-                items = [data] # Попытка обработки одиночного объекта
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            items = data["data"]
         elif isinstance(data, list):
             items = data
+        elif isinstance(data, dict):
+            items = [data] # Одиночный объект
             
-        print(f"DEBUG: API returned {len(items)} items.")
-        
-        # DEBUG: Выведем тип первого элемента, чтобы понять, почему падает
-        if items:
-            print(f"DEBUG: First item type: {type(items[0])}")
-            if not isinstance(items[0], dict):
-                 print(f"DEBUG: First item content (partial): {str(items[0])[:100]}")
+        # 2. Сглаживание списка: превращаем [[{...}], [{...}]] в [{...}, {...}]
+        final_items = []
+        for item in items:
+            if isinstance(item, dict):
+                final_items.append(item)
+            elif isinstance(item, list):
+                # Пробуем добавить все элементы внутреннего списка
+                for sub_item in item:
+                    if isinstance(sub_item, dict):
+                        final_items.append(sub_item)
 
-        return items
+        print(f"DEBUG: API returned {len(items)} raw groups, normalized to {len(final_items)} dict releases.")
+        return final_items
         
     except Exception as e:
         print(f"ERROR: Fetching data failed: {e}")
         return []
 
 def build_rss_item(release, torrent):
+    """
+    Создает один <item> для XML из релиза и конкретного торрента
+    """
     item = ET.Element("item")
     
     # Заголовок
     name_obj = release.get("name", {})
-    if not isinstance(name_obj, dict):
-         name_obj = {} # Защита от странных данных
-         
     ru_title = name_obj.get("main", "Unknown")
     en_title = name_obj.get("english", "")
     
@@ -184,11 +185,8 @@ async def torznab_endpoint(
         
         generated_count = 0
         for release in releases:
-            # ЗАЩИТА ОТ БИТОЙ СТРУКТУРЫ:
-            if not isinstance(release, dict):
-                print(f"WARN: Skipping item because it is not a dict: {type(release)}")
-                continue
-
+            # На этом этапе 'release' гарантированно должен быть dict благодаря сглаживанию в fetch_releases.
+            
             # Получаем список торрентов.
             torrents_list = release.get("torrents", [])
             
@@ -196,15 +194,11 @@ async def torznab_endpoint(
             if isinstance(torrents_list, dict):
                 torrents_list = list(torrents_list.values())
             
-            # Если include не сработал или торрентов нет, список будет пуст
             if not torrents_list:
-                # Можно попробовать логировать ID релиза, чтобы проверить его на сайте
-                # print(f"DEBUG: No torrents for release {release.get('id')}")
                 continue
 
             for torrent in torrents_list:
                 try:
-                    # Еще одна защита, если торрент внутри списка не словарь
                     if not isinstance(torrent, dict):
                         continue
                         
