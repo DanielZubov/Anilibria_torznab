@@ -10,7 +10,7 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/5.6" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/5.7" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
@@ -103,7 +103,10 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
 def build_rss_item(release, torrent):
     item = ET.Element("item")
     name_obj = release.get("name", {})
-    en_title = name_obj.get("english", name_obj.get("main", "Unknown Series")) 
+    
+    # 1. Получаем Русское и Английское названия
+    ru_title = name_obj.get("main", "Unknown Series").strip()
+    en_title = name_obj.get("english", ru_title).strip() 
     
     quality = "Unknown"
     if "quality" in torrent and isinstance(torrent["quality"], dict):
@@ -114,29 +117,14 @@ def build_rss_item(release, torrent):
     size_bytes = torrent.get("size", 0)
     torrent_id = torrent.get("id")
     
-    # 1. Base Title 
-    full_title = en_title.strip()
+    # 2. Формируем базовый заголовок: Русское (Английское)
+    base_title = f"{ru_title} ({en_title})"
+    full_title = base_title.strip()
     
-    # АГРЕССИВНАЯ ОЧИСТКА ЗАГОЛОВКА (Удаляем 'Part', 'Season', 'S0x' и т.п.)
-    full_title = (full_title
-                  .replace(': Part 1', '')
-                  .replace(': Part 2', '')
-                  .replace(' Part 1', '')
-                  .replace(' Part 2', '')
-                  .replace(' Season 1', '')
-                  .replace(' Season 2', '')
-                  .replace(' Season 3', '')
-                  .replace(' Season 4', '')
-                  .replace(' S1', '')
-                  .replace(' S2', '')
-                  .replace(' S3', '')
-                  .replace(' S4', '')
-                  .strip())
-    
-    # 2. Episode/Part Info
+    # 3. Episode/Part Info
     ep_info = torrent.get("description", "") or "" 
     
-    # 2a. Удаляем русские слова/метки
+    # 3a. Очищаем описание от меток
     ep_info = (ep_info
                .replace('[Фильм]', '')
                .replace('[Спешл]', '')
@@ -152,36 +140,36 @@ def build_rss_item(release, torrent):
         else:
              ep_info = ""
 
-    # 2b. Форматируем оставшуюся информацию об эпизодах в формат S01Exx-Exx
+    # 3b. Форматируем информацию об эпизодах (БЕЗ СЕЗОНА)
     if ep_info:
         cleaned_ep_info = ep_info.strip().replace('[', '').replace(']', '').replace(' ', '')
         
-        # Если это диапазон (напр. 1-12, 14-24), форматируем его как S01E<start>-<end>
+        # Если это диапазон (напр. 1-12, 14-24), форматируем его как E<start>-E<end>
         if any(char in cleaned_ep_info for char in ['-', ',']):
             
-            # Разделяем диапазон и форматируем его в E<AEN>-E<AEN>
             if '-' in cleaned_ep_info:
                 try:
                     start, end = map(int, cleaned_ep_info.split('-'))
-                    # Используем S01 для всех релизов, т.к. реальный номер сезона неизвестен
-                    full_title += f" S01E{start:02d}-E{end:02d}"
+                    # Форматирование только эпизодов
+                    full_title += f" E{start:02d}-E{end:02d}"
                 except ValueError:
-                    full_title += f" S01E{cleaned_ep_info}" # Fallback
+                    full_title += f" {cleaned_ep_info}" # Fallback
             else: # Если это список эпизодов через запятую
-                 full_title += f" S01E{cleaned_ep_info}" 
+                 full_title += f" {cleaned_ep_info}" 
             
-        # Если это один эпизод, форматируем как S01E01
+        # Если это один эпизод, форматируем как E01
         elif cleaned_ep_info.isdigit() and len(cleaned_ep_info) <= 3:
-            full_title += f" S01E{int(cleaned_ep_info):02d}"
+            # Форматирование только эпизода
+            full_title += f" E{int(cleaned_ep_info):02d}"
         
         # Если это текстовая метка (например, Ryuusui), добавляем ее как есть
         elif cleaned_ep_info:
              full_title += f" [{cleaned_ep_info}]"
 
-    # 3. Add Language Tag (Оставляем [Rus], как показано в ваших логах)
+    # 4. Add Language Tag 
     full_title += " [Rus]"
     
-    # 4. Add Quality 
+    # 5. Add Quality 
     if quality and quality != "Unknown":
         full_title += f" [{quality}]"
         
