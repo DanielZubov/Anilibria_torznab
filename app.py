@@ -10,7 +10,7 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/3.1" # Обновляем версию
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/4.0" # Обновляем версию
 
 def get_xml_bytes(elem):
     """Превращает объект XML в байты."""
@@ -121,24 +121,53 @@ def fetch_releases(query: str = None, limit: int = 50) -> list:
         print(f"ERROR: Fetching data failed: {e}")
         return []
 
-# Функция build_rss_item() без изменений.
+# ИЗМЕНЕНИЕ: Оптимизация заголовка
 def build_rss_item(release, torrent):
     item = ET.Element("item")
     name_obj = release.get("name", {})
-    ru_title = name_obj.get("main", "Unknown")
-    en_title = name_obj.get("english", "")
+    # ru_title = name_obj.get("main", "Unknown") # Игнорируем русское название для парсинга
+    en_title = name_obj.get("english", name_obj.get("main", "Unknown Series")) # Берем английское, если есть
+    
     quality = "Unknown"
     if "quality" in torrent and isinstance(torrent["quality"], dict):
         quality = torrent["quality"].get("description", torrent["quality"].get("value", ""))
     elif "quality" in torrent:
          quality = str(torrent["quality"])
+         
     size_bytes = torrent.get("size", 0)
     torrent_id = torrent.get("id")
+    
+    # Пытаемся получить информацию об эпизодах
     ep_info = torrent.get("description", "") 
     if not ep_info:
-        ep_info = f"E{release.get('episodes_total', '?')}"
-    full_title = f"{ru_title} / {en_title} [{quality}] [{ep_info}]"
+        # Если описания нет, используем общее количество эпизодов для диапазона
+        episodes_total = release.get('episodes_total')
+        if episodes_total and episodes_total > 0:
+             ep_info = f"1-{episodes_total}"
+        else:
+             ep_info = "" # Оставляем пустым, если не можем определить
+             
+    # ФОРМИРОВАНИЕ НОВОГО, ЧИСТОГО ЗАГОЛОВКА ДЛЯ ПАРСЕРА SONARR
+    
+    # 1. Base Title (Только английское название)
+    full_title = en_title
+    
+    # 2. Add Episode Info (SXXEXX или диапазон)
+    if ep_info:
+        # Добавляем информацию об эпизодах в скобках, если она есть
+        full_title += f" [{ep_info}]" 
+
+    # 3. Add Quality
+    if quality and quality != "Unknown":
+        full_title += f" [{quality}]"
+        
+    # Примеры (в зависимости от данных API):
+    # Dr. Stone: Science Future Part 2 [1-12] [1080p]
+    # Dr. Stone: Ryuusui [Фильм] [1080p]
+    
     ET.SubElement(item, "title").text = full_title
+    
+    # --- Остальная часть функции без изменений ---
     guid = ET.SubElement(item, "guid", isPermaLink="false")
     guid.text = f"anilibria-{torrent_id}"
     download_url = f"{API_BASE}/anime/torrents/{torrent_id}/file"
@@ -277,4 +306,4 @@ async def torznab_endpoint(
         return Response(content=get_xml_bytes(rss), media_type="application/xml")
 
     else:
-        return Response(content="Unknown functionality", status_code=400) 
+        return Response(content="Unknown functionality", status_code=400)
