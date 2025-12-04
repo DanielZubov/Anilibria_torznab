@@ -10,19 +10,18 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.8"
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.9"
 
 def get_xml_bytes(elem):
     """
-    Превращает объект XML в байты для ответа, используя только ElementTree, 
-    чтобы избежать ошибки 'unbound prefix'.
+    Превращает объект XML в байты для ответа, используя только ElementTree.
     """
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
 def fetch_releases(query: str = None, limit: int = 50):
     """
-    Запрос к API АниЛибрии. Использует search endpoint, если есть query,
-    и latest endpoint, если query отсутствует.
+    Запрос к API АниЛибрии. Убран include=torrents, так как он ломает API.
+    Теперь мы полагаемся на то, что API возвращает торренты по умолчанию.
     """
     headers = {"User-Agent": USER_AGENT}
     
@@ -31,17 +30,17 @@ def fetch_releases(query: str = None, limit: int = 50):
 
         # 1. Определяем эндпоинт и параметры
         if query:
-            # 1а. Поиск (Sonarr/Radarr/Prowlarr Search): используем search endpoint с torrents
+            # 1а. Поиск (Search): 
             url = f"{API_BASE}/app/search/releases"
             base_params["query"] = query
-            base_params["include"] = "torrents" 
-            print(f"DEBUG: Using SEARCH endpoint for query: '{query}' (Include Torrents: True)")
+            # base_params["include"] = "torrents" - УБРАН 
+            print(f"DEBUG: Using SEARCH endpoint for query: '{query}' (No 'include=torrents' flag)")
         else:
-            # 1б. RSS/Latest (Test / Initial Search): используем latest endpoint с torrents
-            # Если API не может вернуть торренты здесь, Prowlarr/Sonarr просто не найдут последних релизов.
-            url = f"{API_BASE}/anime/releases/latest"
-            base_params["include"] = "torrents" 
-            print(f"DEBUG: Using LATEST endpoint for RSS/Latest (Include Torrents: True)")
+            # 1б. RSS/Latest (Test / Initial Search): 
+            # Используем более стабильный /anime/releases
+            url = f"{API_BASE}/anime/releases" 
+            # base_params["include"] = "torrents" - УБРАН
+            print(f"DEBUG: Using GENERIC RELEASES endpoint for RSS/Latest (No 'include=torrents' flag)")
 
         resp = requests.get(url, params=base_params, headers=headers, timeout=15)
         resp.raise_for_status()
@@ -165,7 +164,7 @@ async def torznab_endpoint(
     limit: int = Query(50),
     offset: int = Query(0)
 ):
-    # 1. CAPS
+    # 1. CAPS - без изменений
     if t == "caps":
         root = ET.Element("caps")
         server = ET.SubElement(root, "server")
@@ -204,8 +203,7 @@ async def torznab_endpoint(
             if isinstance(torrents_list, dict):
                 torrents_list = list(torrents_list.values())
             
-            # Теперь, если торрентов нет, мы просто пропускаем этот элемент. 
-            # Это гарантирует, что мы возвращаем только валидные торренты.
+            # Мы генерируем XML, только если торренты действительно есть в релизе.
             if not torrents_list:
                 continue
 
