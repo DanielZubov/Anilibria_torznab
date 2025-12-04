@@ -10,7 +10,7 @@ app = FastAPI()
 
 # --- КОНФИГУРАЦИЯ ---
 API_BASE = "https://anilibria.top/api/v1"
-USER_AGENT = "AniLiberty-Prowlarr-Bridge/1.9"
+USER_AGENT = "AniLiberty-Prowlarr-Bridge/2.0" # Обновляем версию
 
 def get_xml_bytes(elem):
     """
@@ -18,36 +18,57 @@ def get_xml_bytes(elem):
     """
     return ET.tostring(elem, encoding="utf-8", xml_declaration=True)
 
-def fetch_releases(query: str = None, limit: int = 50):
+def fetch_torrents_for_release(release_id: int) -> list:
     """
-    Запрос к API АниЛибрии. Убран include=torrents, так как он ломает API.
-    Теперь мы полагаемся на то, что API возвращает торренты по умолчанию.
+    Получает данные о торрентах для конкретного ID релиза.
+    API: GET /anime/torrents/release/{releaseId}
+    """
+    url = f"{API_BASE}/anime/torrents/release/{release_id}"
+    headers = {"User-Agent": USER_AGENT}
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        torrents = data.get('torrents', data)
+        
+        if isinstance(torrents, dict):
+            return list(torrents.values())
+        if isinstance(torrents, list):
+            return torrents
+        
+        return []
+    except Exception as e:
+        print(f"ERROR: Failed to fetch torrents for release {release_id}: {e}")
+        return []
+
+
+def fetch_releases(query: str = None, limit: int = 50) -> list:
+    """
+    Шаг 1: Получает список релизов (с ID).
     """
     headers = {"User-Agent": USER_AGENT}
     
     try:
         base_params = {"limit": limit}
 
-        # 1. Определяем эндпоинт и параметры
         if query:
-            # 1а. Поиск (Search): 
+            # Поиск
             url = f"{API_BASE}/app/search/releases"
             base_params["query"] = query
-            # base_params["include"] = "torrents" - УБРАН 
-            print(f"DEBUG: Using SEARCH endpoint for query: '{query}' (No 'include=torrents' flag)")
+            print(f"DEBUG: Using SEARCH endpoint for query: '{query}'")
         else:
-            # 1б. RSS/Latest (Test / Initial Search): 
-            # Используем более стабильный /anime/releases
+            # RSS/Latest
             url = f"{API_BASE}/anime/releases" 
-            # base_params["include"] = "torrents" - УБРАН
-            print(f"DEBUG: Using GENERIC RELEASES endpoint for RSS/Latest (No 'include=torrents' flag)")
+            print(f"DEBUG: Using GENERIC RELEASES endpoint for RSS/Latest")
 
         resp = requests.get(url, params=base_params, headers=headers, timeout=15)
         resp.raise_for_status()
         
         data = resp.json()
         
-        # 2. Нормализация исходного списка
+        # 1. Нормализация исходного списка
         items = []
         if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
             items = data["data"]
@@ -56,13 +77,25 @@ def fetch_releases(query: str = None, limit: int = 50):
         elif isinstance(data, dict):
             items = [data]
             
-        # 3. РЕКУРСИВНОЕ "РАЗГЛАЖИВАНИЕ"
+        # 2. РЕКУРСИВНОЕ "РАЗГЛАЖИВАНИЕ" (усиленная версия)
         final_items = []
         
         def recursive_flatten(obj):
-            """Рекурсивно извлекает все словари из вложенных списков."""
+            """Рекурсивно извлекает все словари релизов из вложенных списков/словарей."""
             if isinstance(obj, dict):
-                final_items.append(obj)
+                # 2а. Специфическая структура поиска: релиз вложен в ключ 'release'
+                if "release" in obj and isinstance(obj["release"], dict):
+                    final_items.append(obj["release"])
+                    return
+                # 2б. Проверка, является ли сам словарь релизом (если есть ID и имя)
+                if "id" in obj and "name" in obj:
+                    final_items.append(obj)
+                    return
+                
+                # 2в. Рекурсия по всем значениям словаря
+                for value in obj.values():
+                    recursive_flatten(value)
+
             elif isinstance(obj, list):
                 for element in obj:
                     recursive_flatten(element)
@@ -197,13 +230,26 @@ async def torznab_endpoint(
         generated_count = 0
         for release in releases:
             
-            torrents_list = release.get("torrents", [])
+            release_id = release.get("id")
+            if not release_id:
+                continue
+
+            torrents_list = []
             
-            # API может вернуть словарь вместо массива
-            if isinstance(torrents_list, dict):
-                torrents_list = list(torrents_list.values())
+            if q:
+                # --- ЛОГИКА ПОИСКА (ДВУХШАГОВЫЙ ПРОЦЕСС) ---
+                print(f"DEBUG: Two-step search: Fetching torrents for release ID {release_id}...")
+                torrents_list = fetch_torrents_for_release(release_id)
+            else:
+                # --- ЛОГИКА RSS/Latest (ОДНОШАГОВЫЙ ПРОЦЕСС) ---
+                # Предполагаем, что торренты вложены в объект релиза
+                nested_torrents = release.get("torrents", {})
+                if isinstance(nested_torrents, dict):
+                    torrents_list = list(nested_torrents.values())
+                elif isinstance(nested_torrents, list):
+                    torrents_list = nested_torrents
             
-            # Мы генерируем XML, только если торренты действительно есть в релизе.
+            # Мы генерируем XML, только если торренты действительно есть.
             if not torrents_list:
                 continue
 
